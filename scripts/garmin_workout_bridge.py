@@ -1,13 +1,14 @@
-"""Publish one validated workout to a local python-garminconnect session."""
+"""Manage a workout in the verified owner's Garmin Connect library."""
 
 import json
 import logging
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 
-from garminconnect import Garmin
+from garminconnect import Garmin, GarminConnectConnectionError
 
 
 SPORTS = {"running": 1, "walking": 12, "cycling": 2}
@@ -57,39 +58,57 @@ def workout_shape(workout):
     )
 
 
-def publish(garmin, request):
-    recent = garmin.get_activities(0, 20)
-    if not any(row["activityId"] == request["expectedActivityId"] for row in recent):
-        return {"status": "workout_account_unverified"}
+class LibraryLimit(Exception):
+    pass
 
-    payload = build_payload(request["workout"])
-    expected = workout_shape(payload)
+
+def library(garmin):
     for offset in range(0, 1000, 100):
         rows = garmin.get_workouts(start=offset, limit=100)
         if not isinstance(rows, list):
-            return {"status": "workout_service_unavailable"}
-        for row in rows:
-            if row["workoutName"] != payload["workoutName"]:
-                continue
-            workout_id = int(row["workoutId"])
-            if workout_shape(garmin.get_workout_by_id(workout_id)) == expected:
-                return {"status": "already_exists", "workoutId": workout_id}
-            return {"status": "workout_name_conflict"}
+            raise ValueError("Invalid workout list")
+        yield from rows
         if len(rows) < 100:
-            break
-    else:
-        return {"status": "workout_library_limit"}
+            return
+    raise LibraryLimit()
+
+
+def named_workout(garmin, name):
+    return next((int(row["workoutId"]) for row in library(garmin) if row["workoutName"] == name), None)
+
+
+def http_status(error):
+    while error is not None:
+        code = getattr(getattr(error, "response", None), "status_code", None)
+        if code is not None:
+            return code
+        # 0.3.2 drops the Response and wraps its own "API Error NNN" exception.
+        if isinstance(error, GarminConnectConnectionError):
+            match = re.match(r"^API Error (\d{3})\b", str(error))
+            if match:
+                return int(match[1])
+        error = error.__cause__
+    return None
+
+
+def failure(error, fallback):
+    return {"status": {400: "workout_rejected", 401: "workout_session_unavailable",
+                       403: "garmin_access_denied", 429: "garmin_rate_limited"}.get(http_status(error), fallback)}
+
+
+def create(garmin, draft):
+    payload = build_payload(draft)
+    expected = workout_shape(payload)
+    existing = named_workout(garmin, payload["workoutName"])
+    if existing is not None:
+        if workout_shape(garmin.get_workout_by_id(existing)) == expected:
+            return {"status": "already_exists", "workoutId": existing}
+        return {"status": "workout_name_conflict"}
 
     try:
         uploaded = garmin.upload_workout(payload)
     except Exception as error:
-        status = getattr(getattr(error, "response", None), "status_code", None)
-        if status in {400, 401, 403, 429}:
-            return {"status": {
-                400: "workout_rejected", 401: "workout_session_unavailable",
-                403: "garmin_access_denied", 429: "garmin_rate_limited",
-            }[status]}
-        return {"status": "workout_write_unconfirmed"}
+        return failure(error, "workout_write_unconfirmed")
     try:
         workout_id = int(uploaded["workoutId"])
         if workout_id > 0 and workout_shape(garmin.get_workout_by_id(workout_id)) == expected:
@@ -97,6 +116,71 @@ def publish(garmin, request):
     except Exception:
         pass
     return {"status": "workout_write_unconfirmed"}
+
+
+def read_workout(garmin, workout_id):
+    try:
+        workout = garmin.get_workout_by_id(workout_id)
+    except Exception as error:
+        if http_status(error) == 404:
+            return None
+        raise
+    if int(workout["workoutId"]) != workout_id or not isinstance(workout["workoutName"], str):
+        raise ValueError("Unexpected workout")
+    return workout
+
+
+def edit_existing(garmin, operation, request):
+    workout_id = request["workoutId"]
+    current = read_workout(garmin, workout_id)
+    if current is None or not any(int(row["workoutId"]) == workout_id for row in library(garmin)):
+        return {"status": "workout_not_found"}
+    result = {"workoutId": workout_id, "name": current["workoutName"]}
+    if operation == "update":
+        name = request.get("name", current["workoutName"])
+        if name != current["workoutName"] and named_workout(garmin, name) is not None:
+            return {"status": "workout_name_conflict"}
+        payload = {**current, "workoutName": name}
+        if "steps" in request:
+            sport = current["sportType"]["sportTypeKey"]
+            segments = current["workoutSegments"]
+            if sport not in SPORTS or len(segments) != 1:
+                return {"status": "workout_unsupported"}
+            new = build_payload({"name": name, "sport": sport, "steps": request["steps"]})
+            payload["workoutSegments"] = [{**segments[0], "workoutSteps": new["workoutSegments"][0]["workoutSteps"]}]
+    if request["confirm"] is not True:
+        return {**result, "status": "preview"}
+    try:
+        if operation == "delete":
+            garmin.delete_workout(workout_id)
+        else:
+            if payload == current:
+                return {**result, "status": "unchanged"}
+            garmin.client.put("connectapi", f"{garmin.garmin_workouts}/workout/{workout_id}", json=payload)
+    except Exception as error:
+        return failure(error, "workout_write_unconfirmed")
+    try:
+        saved = read_workout(garmin, workout_id)
+        if operation == "delete" and saved is None:
+            return {**result, "status": "deleted"}
+        if operation == "update" and saved and saved["workoutName"] == name:
+            if "steps" not in request or workout_shape(saved) == workout_shape(payload):
+                return {"workoutId": workout_id, "name": name, "status": "updated"}
+    except Exception:
+        pass
+    return {"status": "workout_write_unconfirmed"}
+
+
+def publish(garmin, request):
+    recent = garmin.get_activities(0, 20)
+    if not any(row["activityId"] == request["expectedActivityId"] for row in recent):
+        return {"status": "workout_account_unverified"}
+    operation = request["operation"]
+    if operation == "create":
+        return create(garmin, request["workout"])
+    if operation in {"update", "delete"}:
+        return edit_existing(garmin, operation, request)
+    return {"status": "workout_rejected"}
 
 
 def main(token_dir):
@@ -130,7 +214,8 @@ if __name__ == "__main__":
     logging.disable(logging.CRITICAL)
     try:
         result = main(sys.argv[1])
+    except LibraryLimit:
+        result = {"status": "workout_library_limit"}
     except Exception as error:
-        status = getattr(getattr(error, "response", None), "status_code", None)
-        result = {"status": "garmin_rate_limited" if status == 429 else "workout_service_unavailable"}
+        result = failure(error, "workout_service_unavailable")
     print(json.dumps(result))

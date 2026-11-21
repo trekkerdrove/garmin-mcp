@@ -4,10 +4,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import io.github.trekkerdrove.garminmcp.application.dto.GarminFailure;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
+import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import io.github.trekkerdrove.garminmcp.application.port.out.WorkoutPublisher;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.json.JsonMapper;
@@ -15,7 +17,8 @@ import tools.jackson.databind.json.JsonMapper;
 final class PythonWorkoutPublisher implements WorkoutPublisher {
     private static final Set<String> FAILURES = Set.of("workout_account_unverified", "workout_name_conflict",
             "workout_library_limit", "workout_rejected", "workout_write_unconfirmed", "workout_session_unavailable",
-            "workout_service_unavailable", "garmin_rate_limited", "garmin_access_denied");
+            "workout_service_unavailable", "garmin_rate_limited", "garmin_access_denied", "workout_not_found",
+            "workout_unsupported");
     private static final int MAX_RESPONSE = 4096;
     private final JsonMapper json = JsonMapper.builder().build();
     private final Path python;
@@ -29,7 +32,7 @@ final class PythonWorkoutPublisher implements WorkoutPublisher {
     }
 
     @Override
-    public PublishedWorkout publish(WorkoutDraft workout, long expectedActivityId) {
+    public ToolResult publish(Operation operation, Map<String, Object> args, long expectedActivityId) {
         if (!Files.isRegularFile(tokenDirectory.resolve("garmin_tokens.json"))) {
             throw new GarminFailure("workout_session_unavailable");
         }
@@ -38,10 +41,12 @@ final class PythonWorkoutPublisher implements WorkoutPublisher {
         command.environment().clear();
         Process worker = null;
         try {
-            var request = json.writeValueAsBytes(Map.of("workout", workout, "expectedActivityId", expectedActivityId));
+            var request = new HashMap<>(args);
+            request.put("operation", operation);
+            request.put("expectedActivityId", expectedActivityId);
             worker = command.start();
             try (var input = worker.getOutputStream()) {
-                input.write(request);
+                input.write(json.writeValueAsBytes(request));
             }
             if (!worker.waitFor(45, TimeUnit.SECONDS) || worker.exitValue() != 0) {
                 throw new GarminFailure("workout_write_unconfirmed");
@@ -54,8 +59,25 @@ final class PythonWorkoutPublisher implements WorkoutPublisher {
                 var reply = json.readTree(bytes);
                 var status = reply.path("status").asString("");
                 long id = reply.path("workoutId").asLong(0);
-                if (id > 0 && (status.equals("created") || status.equals("already_exists"))) {
-                    return new PublishedWorkout(id, workout.name(), status.equals("already_exists"));
+                if (operation == Operation.create && id > 0 && (status.equals("created") || status.equals("already_exists"))) {
+                    var draft = (WorkoutDraft) args.get("workout");
+                    return new ToolResult(status, Map.of("workoutId", id, "name", draft.name(), "reused", status.equals("already_exists")));
+                }
+                if (operation != Operation.create && Long.valueOf(id).equals(args.get("workoutId"))) {
+                    boolean confirm = Boolean.TRUE.equals(args.get("confirm"));
+                    String name = reply.path("name").asString("");
+                    boolean success = operation == Operation.delete ? status.equals("deleted")
+                            : status.equals("updated") || status.equals("unchanged");
+                    if (!name.isBlank() && name.length() <= 512 && (confirm ? success : status.equals("preview"))) {
+                        var details = new HashMap<String, Object>();
+                        details.put("workoutId", id);
+                        details.put("name", name);
+                        if (!confirm && operation == Operation.update) {
+                            if (args.containsKey("name")) details.put("newName", args.get("name"));
+                            if (args.containsKey("steps")) details.put("replacementSteps", args.get("steps"));
+                        }
+                        return new ToolResult(status, details);
+                    }
                 }
                 throw new GarminFailure(FAILURES.contains(status) ? status : "workout_write_unconfirmed");
             }

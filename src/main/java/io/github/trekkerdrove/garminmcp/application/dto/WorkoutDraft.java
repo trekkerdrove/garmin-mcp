@@ -20,12 +20,24 @@ public record WorkoutDraft(String name, Sport sport, List<Step> steps) {
     }
 
     public WorkoutDraft {
-        if (name == null || name.isBlank() || name.strip().length() > 120 || name.chars().anyMatch(Character::isISOControl)
-                || sport == null || steps == null || steps.isEmpty() || steps.size() > 50
-                || steps.stream().anyMatch(java.util.Objects::isNull)) {
-            throw new IllegalArgumentException("Invalid workout");
+        name = validName(name);
+        steps = validSteps(steps);
+        if (sport == null) {
+            throw new IllegalArgumentException("Missing sport");
         }
-        name = name.strip();
-        steps = List.copyOf(steps);
+    }
+
+    public static String validName(String name) {
+        if (name == null || name.isBlank() || name.strip().length() > 120 || name.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException("Invalid workout name");
+        }
+        return name.strip();
+    }
+
+    public static List<Step> validSteps(List<Step> steps) {
+        if (steps == null || steps.isEmpty() || steps.size() > 50 || steps.stream().anyMatch(java.util.Objects::isNull)) {
+            throw new IllegalArgumentException("Invalid workout steps");
+        }
+        return List.copyOf(steps);
     }
 }

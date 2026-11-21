@@ -3,7 +3,7 @@ package io.github.trekkerdrove.garminmcp.adapter.in.mcp;
 import java.util.List;
 import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
-import io.github.trekkerdrove.garminmcp.application.service.CreateWorkout;
+import io.github.trekkerdrove.garminmcp.application.service.WorkoutService;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -12,10 +12,10 @@ import org.springframework.stereotype.Component;
 @Component
 @ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
 class WorkoutTools {
-    private final CreateWorkout createWorkout;
+    private final WorkoutService workouts;
 
-    WorkoutTools(CreateWorkout createWorkout) {
-        this.createWorkout = createWorkout;
+    WorkoutTools(WorkoutService workouts) {
+        this.workouts = workouts;
     }
 
     @McpTool(name = "garmin_create_workout",
@@ -29,6 +29,27 @@ class WorkoutTools {
             @McpToolParam(description = "1 to 50 ordered steps. Each has a kind (warmup, interval, recovery, cooldown), "
                     + "exactly one of durationSeconds or distanceMeters, and an optional heartRateZone (1–5).") List<WorkoutDraft.Step> steps,
             @McpToolParam(required = false, description = "Default false. Set true only after the user approves the workout.") Boolean confirm) {
-        return ToolResult.run(() -> createWorkout.execute(new WorkoutDraft(name, sport, steps), Boolean.TRUE.equals(confirm)));
+        return ToolResult.run(() -> workouts.create(new WorkoutDraft(name, sport, steps), Boolean.TRUE.equals(confirm)));
+    }
+
+    @McpTool(name = "garmin_update_workout", description = "Edit a library workout in place by ID. Supply a new name, "
+            + "a complete replacement step list, or both. Show the preview before confirming.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = false, destructiveHint = true, idempotentHint = false))
+    public ToolResult update(
+            @McpToolParam(description = "Garmin library workout ID.") long workoutId,
+            @McpToolParam(required = false, description = "New workout name.") String name,
+            @McpToolParam(required = false, description = "Replace all steps of a single-segment running, walking or cycling workout. "
+                    + "Uses the same steps as garmin_create_workout.") List<WorkoutDraft.Step> steps,
+            @McpToolParam(required = false, description = "Default false. Set true after approval.") Boolean confirm) {
+        return ToolResult.run(() -> workouts.update(workoutId, name, steps, Boolean.TRUE.equals(confirm)));
+    }
+
+    @McpTool(name = "garmin_delete_workout", description = "Permanently delete one library workout by ID. "
+            + "Show the current name and ID from the preview and obtain approval before confirming.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = false, destructiveHint = true, idempotentHint = true))
+    public ToolResult delete(
+            @McpToolParam(description = "Garmin library workout ID.") long workoutId,
+            @McpToolParam(required = false, description = "Default false. Set true after approval to permanently delete.") Boolean confirm) {
+        return ToolResult.run(() -> workouts.delete(workoutId, Boolean.TRUE.equals(confirm)));
     }
 }

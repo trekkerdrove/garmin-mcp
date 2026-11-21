@@ -63,7 +63,7 @@ les quatre variables dans **Environment**. Pour WorkOS AuthKit, active CIMD et d
 `MCP_PUBLIC_URL` comme *Resource Indicator*. Dans ChatGPT web, enregistre cette URL comme
 serveur MCP personnalisé et sélectionne **OAuth**.
 
-## Créer un entraînement
+## Gérer les entraînements
 
 `garmin_create_workout` enregistre une séance dans la bibliothèque Garmin Connect. Il accepte la course, la marche et le vélo, avec 1 à 50 étapes de durée ou de distance et une zone de fréquence cardiaque facultative. Le premier appel prévisualise les étapes. Passe `confirm: true` après validation pour enregistrer la séance et la relire. Une séance identique portant le même nom est réutilisée. Pour une séance différente, choisis un autre nom.
 
@@ -79,6 +79,13 @@ serveur MCP personnalisé et sélectionne **OAuth**.
 }
 ```
 
-Le 37ᵉ outil est disponible quand `GARMIN_WORKOUT_WRITES_ENABLED=true`. Génère une session en Terminal avec `uv run --script scripts/prototype_garmin_workout.py login --token-dir ~/.garmin-connect-workouts` sur ton poste. En local, installe `garminconnect==0.3.2` dans un environnement Python et indique son exécutable avec `GARMIN_WORKOUT_PYTHON`. Renseigne `GARMIN_CONNECT_TOKEN_DIR` avec le dossier privé de la session. Le serveur compare une activité récente à la Personal API avant la création pour vérifier que les deux accès visent le même compte.
+| Outil | Appel de prévisualisation |
+| --- | --- |
+| `garmin_update_workout` | `{"workoutId":123,"name":"Nouveau nom"}`. Fournis `steps` pour remplacer toutes les étapes d’une séance mono-segment de course, marche ou vélo. Les champs omis sont conservés. |
+| `garmin_delete_workout` | `{"workoutId":123}` renvoie le nom et l’ID de la séance ciblée. La suppression est définitive. |
+
+Après vérification de l’aperçu, ajoute `"confirm":true` aux mêmes arguments. La modification conserve l’ID. Le serveur relit la séance après écriture et vérifie sa disparition après suppression. Un ID absent renvoie `workout_not_found`. Si la vérification échoue après l’envoi de l’écriture, le statut `workout_write_unconfirmed` signale que l’état final reste à vérifier.
+
+Les trois outils d’écriture portent le catalogue à 39 outils quand `GARMIN_WORKOUT_WRITES_ENABLED=true`. Génère une session en Terminal avec `uv run --script scripts/prototype_garmin_workout.py login --token-dir ~/.garmin-connect-workouts` sur ton poste. En local, installe `garminconnect==0.3.2` dans un environnement Python et indique son exécutable avec `GARMIN_WORKOUT_PYTHON`. Renseigne `GARMIN_CONNECT_TOKEN_DIR` avec le dossier privé de la session. Le serveur compare une activité récente à la Personal API avant tout accès à la bibliothèque pour vérifier que les deux accès visent le même compte.
 
 L’image Docker embarque le client Python. Sur Render, ajoute le fichier de la session dédiée aux **Secret Files**, puis règle `GARMIN_CONNECT_SESSION_FILE=/etc/secrets/garmin_tokens.json` et active l’écriture. Le serveur garde une copie privée pour renouveler la session pendant son exécution. Le système de fichiers de Render Free est éphémère. Remplace le fichier secret si Garmin refuse la session après un redémarrage. L’adaptateur utilise l’API interne Garmin Connect, dont les réponses et le mécanisme de connexion peuvent évoluer.

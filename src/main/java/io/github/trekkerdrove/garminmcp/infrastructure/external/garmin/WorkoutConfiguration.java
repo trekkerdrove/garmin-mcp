@@ -6,7 +6,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader;
 import io.github.trekkerdrove.garminmcp.application.port.out.WorkoutPublisher;
-import io.github.trekkerdrove.garminmcp.application.service.CreateWorkout;
+import io.github.trekkerdrove.garminmcp.application.service.WorkoutService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -29,8 +29,8 @@ class WorkoutConfiguration {
     }
 
     @Bean
-    CreateWorkout createWorkout(ActivityReader activities, WorkoutPublisher publisher) {
-        return new CreateWorkout(activities, publisher);
+    WorkoutService workouts(ActivityReader activities, WorkoutPublisher publisher) {
+        return new WorkoutService(activities, publisher);
     }
 
     private static Path privateCopy(Path sessionFile) throws IOException {
