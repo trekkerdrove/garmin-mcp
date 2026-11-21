@@ -3,6 +3,7 @@ package io.github.trekkerdrove.garminmcp.application.service;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.Semaphore;
 import io.github.trekkerdrove.garminmcp.application.dto.GarminFailure;
 import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
@@ -41,6 +42,30 @@ public final class WorkoutService {
 
     public ToolResult delete(long workoutId, boolean confirm) {
         return run(Operation.delete, target(workoutId, confirm));
+    }
+
+    public ToolResult search(String query, int limit) {
+        if (limit < 1 || limit > 20) {
+            throw new IllegalArgumentException("Invalid workout search limit");
+        }
+        return run(Operation.search, Map.of("query", query == null ? "" : WorkoutDraft.validName(query), "limit", limit));
+    }
+
+    public ToolResult get(long workoutId) {
+        return run(Operation.get, target(workoutId, false));
+    }
+
+    public ToolResult duplicate(long workoutId, String name, List<WorkoutDraft.DistanceChange> changes, boolean confirm) {
+        var args = new HashMap<>(target(workoutId, confirm));
+        args.put("name", WorkoutDraft.validName(name));
+        if (changes != null) {
+            if (changes.size() > 50 || changes.stream().anyMatch(Objects::isNull)
+                    || changes.stream().map(WorkoutDraft.DistanceChange::stepOrder).distinct().count() != changes.size()) {
+                throw new IllegalArgumentException("Invalid workout distance changes");
+            }
+            args.put("distanceChanges", List.copyOf(changes));
+        }
+        return run(Operation.duplicate, args);
     }
 
     private static Map<String, Object> target(long workoutId, boolean confirm) {

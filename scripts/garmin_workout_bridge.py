@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import unicodedata
 
 from garminconnect import Garmin, GarminConnectConnectionError
 
@@ -74,13 +75,22 @@ class LibraryLimit(Exception):
 
 
 def library(garmin):
-    for offset in range(0, 1000, 100):
+    seen = set()
+    # Garmin treats both 0 and 1 as the first item.
+    for offset in range(1, 1001, 100):
         rows = garmin.get_workouts(start=offset, limit=100)
         if not isinstance(rows, list):
             raise ValueError("Invalid workout list")
-        yield from rows
+        previous_count = len(seen)
+        for row in rows:
+            workout_id = int(row["workoutId"])
+            if workout_id not in seen:
+                seen.add(workout_id)
+                yield row
         if len(rows) < 100:
             return
+        if len(seen) == previous_count:
+            break
     raise LibraryLimit()
 
 
@@ -109,10 +119,14 @@ def failure(error, fallback):
 
 def create(garmin, draft):
     payload = build_payload(draft)
-    expected = workout_shape(payload)
+    return save_copy(garmin, payload, workout_shape)
+
+
+def save_copy(garmin, payload, shape, source_id=None):
+    expected = shape(payload)
     existing = named_workout(garmin, payload["workoutName"])
     if existing is not None:
-        if workout_shape(garmin.get_workout_by_id(existing)) == expected:
+        if existing != source_id and shape(garmin.get_workout_by_id(existing)) == expected:
             return {"status": "already_exists", "workoutId": existing}
         return {"status": "workout_name_conflict"}
 
@@ -122,7 +136,7 @@ def create(garmin, draft):
         return failure(error, "workout_write_unconfirmed")
     try:
         workout_id = int(uploaded["workoutId"])
-        if workout_id > 0 and workout_shape(garmin.get_workout_by_id(workout_id)) == expected:
+        if workout_id > 0 and workout_id != source_id and shape(garmin.get_workout_by_id(workout_id)) == expected:
             return {"status": "created", "workoutId": workout_id}
     except Exception:
         pass
@@ -141,10 +155,108 @@ def read_workout(garmin, workout_id):
     return workout
 
 
+def library_workout(garmin, workout_id):
+    workout = read_workout(garmin, workout_id)
+    if workout is not None and any(int(row["workoutId"]) == workout_id for row in library(garmin)):
+        return workout
+    return None
+
+
+def workout_summary(workout):
+    return {
+        "workoutId": int(workout["workoutId"]),
+        "name": workout["workoutName"],
+        "sport": (workout.get("sportType") or {}).get("sportTypeKey"),
+        "updatedAt": workout.get("updatedDate") or workout.get("updateDate") or workout.get("createdDate"),
+    }
+
+
+def search_text(name):
+    return "".join(char for char in unicodedata.normalize("NFKD", name.casefold())
+                   if not unicodedata.combining(char))
+
+
+def search_workouts(garmin, request):
+    query = search_text(request["query"])
+    matches = []
+    capped = False
+    try:
+        for workout in library(garmin):
+            if query in search_text(workout["workoutName"]):
+                matches.append(workout_summary(workout))
+    except LibraryLimit:
+        capped = True
+    matches.sort(key=lambda item: (item["updatedAt"] or "", item["workoutId"]), reverse=True)
+    limit = request["limit"]
+    status = "truncated" if capped or len(matches) > limit else ("ok" if matches else "no_data")
+    return {"status": status, "data": {"workouts": matches[:limit], "libraryScanCapped": capped}}
+
+
+def selected_fields(data, names):
+    return {key: data[key] for key in names if data.get(key) is not None}
+
+
+def copy_step(step):
+    content = selected_fields(step, (
+        "type", "stepOrder", "stepType", "description", "endCondition", "endConditionValue",
+        "endConditionCompare", "endConditionZone", "preferredEndConditionUnit",
+        "targetType", "targetValueOne", "targetValueTwo", "targetValueUnit", "zoneNumber",
+        "secondaryTargetType", "secondaryTargetValueOne", "secondaryTargetValueTwo",
+        "secondaryTargetValueUnit", "secondaryZoneNumber", "strokeType", "equipmentType",
+        "drillType", "category", "exerciseName", "weightValue", "weightUnit", "numberOfIterations",
+        "skipLastRestStep",
+    ))
+    if "workoutSteps" in step:
+        content["workoutSteps"] = [copy_step(child) for child in step["workoutSteps"] or []]
+    return content
+
+
+def workout_content(workout):
+    # Use workout content fields only. Garmin assigns IDs and ownership on upload.
+    content = selected_fields(workout, ("workoutName", "sportType", "subSportType", "description",
+                                        "poolLength", "poolLengthUnit", "isSessionTransitionEnabled"))
+    content["workoutSegments"] = [
+        {**selected_fields(segment, ("segmentOrder", "sportType", "description", "poolLength", "poolLengthUnit")),
+         "workoutSteps": [copy_step(step) for step in segment["workoutSteps"]]}
+        for segment in workout["workoutSegments"]
+    ]
+    return content
+
+
+def all_steps(steps):
+    for step in steps:
+        yield step
+        yield from all_steps(step.get("workoutSteps", []))
+
+
+def duplicate_workout(garmin, request, current):
+    name = request["name"]
+    source_id = request["workoutId"]
+    if name == current["workoutName"]:
+        return {"status": "workout_name_conflict"}
+    content = workout_content(current)
+    content["workoutName"] = name
+    steps = [step for segment in content["workoutSegments"] for step in all_steps(segment["workoutSteps"])]
+    if not steps:
+        return {"status": "workout_unsupported"}
+    for change in request.get("distanceChanges", []):
+        matching = [step for step in steps if step.get("stepOrder") == change["stepOrder"]]
+        if len(matching) != 1 or (matching[0].get("endCondition") or {}).get("conditionTypeKey") != "distance":
+            return {"status": "invalid_input"}
+        matching[0]["endConditionValue"] = change["distanceMeters"]
+    if not request["confirm"]:
+        return {"status": "preview", "data": {"sourceWorkoutId": source_id, "workout": content}}
+    result = save_copy(garmin, content, workout_content, source_id)
+    if result["status"] in {"created", "already_exists"}:
+        return {"status": result["status"], "data": {"sourceWorkoutId": source_id, "workoutId": result["workoutId"],
+                                                     "name": name, "reused": result["status"] == "already_exists"}}
+    return result
+
+
 def edit_existing(garmin, operation, request):
     workout_id = request["workoutId"]
-    current = read_workout(garmin, workout_id)
-    if current is None or not any(int(row["workoutId"]) == workout_id for row in library(garmin)):
+    current = library_workout(garmin, workout_id)
+    if current is None:
         return {"status": "workout_not_found"}
     result = {"workoutId": workout_id, "name": current["workoutName"]}
     if operation == "update":
@@ -191,6 +303,15 @@ def publish(garmin, request):
     operation = request["operation"]
     if operation == "create":
         return create(garmin, request["workout"])
+    if operation == "search":
+        return search_workouts(garmin, request)
+    if operation in {"get", "duplicate"}:
+        current = library_workout(garmin, request["workoutId"])
+        if current is None:
+            return {"status": "workout_not_found"}
+        if operation == "get":
+            return {"status": "ok", "data": {**workout_summary(current), "workout": workout_content(current)}}
+        return duplicate_workout(garmin, request, current)
     if operation in {"update", "delete"}:
         return edit_existing(garmin, operation, request)
     return {"status": "workout_rejected"}
@@ -234,4 +355,7 @@ if __name__ == "__main__":
         result = {"status": "workout_library_limit"}
     except Exception as error:
         result = failure(error, "workout_service_unavailable")
-    print(json.dumps(result))
+    output = json.dumps(result, ensure_ascii=False)
+    if len(output.encode("utf-8")) > 65_536:
+        output = '{"status":"workout_detail_limit"}'
+    print(output)

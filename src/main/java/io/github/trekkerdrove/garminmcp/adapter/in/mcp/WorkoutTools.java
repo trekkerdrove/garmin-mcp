@@ -55,4 +55,34 @@ class WorkoutTools {
             @McpToolParam(required = false, description = "Default false. Set true after approval to permanently delete.") Boolean confirm) {
         return ToolResult.run(() -> workouts.delete(workoutId, Boolean.TRUE.equals(confirm)));
     }
+
+    @McpTool(name = "garmin_search_workouts",
+            description = "Find saved workouts by name in your Garmin Connect library, most recently updated first.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = true))
+    public ToolResult search(
+            @McpToolParam(required = false, description = "Case- and accent-insensitive substring in the workout name. Omit for recent workouts.") String query,
+            @McpToolParam(required = false, description = "Maximum results, 1–20. Defaults to 10.") Integer limit) {
+        return ToolResult.run(() -> workouts.search(query, limit == null ? 10 : limit));
+    }
+
+    @McpTool(name = "garmin_get_workout",
+            description = "Read a saved library workout by ID, including each step, target, and repeat group. "
+                    + "Garmin expresses pace targets in meters per second.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = true))
+    public ToolResult get(@McpToolParam(description = "Garmin library workout ID from garmin_search_workouts.") long workoutId) {
+        return ToolResult.run(() -> workouts.get(workoutId));
+    }
+
+    @McpTool(name = "garmin_duplicate_workout",
+            description = "Copy a saved library workout under a new name. Optionally adjust the lengths of distance-based steps. "
+                    + "Show the proposed copy and obtain approval before confirming. Replaying a verified identical copy reuses its ID.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = false, destructiveHint = false, idempotentHint = false))
+    public ToolResult duplicate(
+            @McpToolParam(description = "Source workout ID from garmin_search_workouts.") long workoutId,
+            @McpToolParam(description = "Name of the copy, up to 120 characters.") String name,
+            @McpToolParam(required = false, description = "List of stepOrder and distanceMeters pairs. Use orders from garmin_get_workout. "
+                    + "Each order must uniquely identify a distance-based step.") List<WorkoutDraft.DistanceChange> distanceChanges,
+            @McpToolParam(required = false, description = "Default false. Set true only after the user approves the copy.") Boolean confirm) {
+        return ToolResult.run(() -> workouts.duplicate(workoutId, name, distanceChanges, Boolean.TRUE.equals(confirm)));
+    }
 }

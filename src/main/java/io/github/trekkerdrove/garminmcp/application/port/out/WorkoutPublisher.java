@@ -4,6 +4,6 @@ import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import java.util.Map;
 
 public interface WorkoutPublisher {
-    enum Operation { create, update, delete }
+    enum Operation { create, update, delete, search, get, duplicate }
     ToolResult publish(Operation operation, Map<String, Object> arguments, long expectedActivityId);
 }

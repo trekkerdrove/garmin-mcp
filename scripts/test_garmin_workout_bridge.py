@@ -89,5 +89,50 @@ class WorkoutBridgeTest(unittest.TestCase):
         self.garmin.client.put.assert_not_called()
 
 
+    def test_search_across_pages_ignores_accents_and_sorts_by_last_update(self):
+        first = {**self.workout, "workoutName": "Fractionné ancien", "updateDate": "2026-11-18"}
+        last = {**self.workout, "workoutId": 43, "workoutName": "FRACTIONNÉ récent", "updateDate": "2026-11-20"}
+        filler = [{"workoutId": i, "workoutName": "Easy"} for i in range(1000, 1099)]
+        self.garmin.get_workouts.side_effect = [[first, *filler], [last]]
+        result = self.invoke("search", query="fractionne", limit=1)
+        self.assertEqual(result["status"], "truncated")
+        self.assertEqual([w["workoutId"] for w in result["data"]["workouts"]], [43])
+        self.garmin.get_workouts.assert_called_with(start=101, limit=100)
+
+    def test_detail_and_copy_keep_nested_targets_without_copying_ids(self):
+        steps = self.workout["workoutSegments"][0]["workoutSteps"]
+        interval = build_payload({"name": "Intervals", "sport": "running", "steps": [
+            {"kind": "interval", "distanceMeters": 400, "paceSecondsPerKm": {"fast": 265, "slow": 275}}]
+        })["workoutSegments"][0]["workoutSteps"][0]
+        steps.append({"type": "RepeatGroupDTO", "stepOrder": 2, "stepId": 88, "numberOfIterations": 6,
+                      "workoutSteps": [{**interval, "stepOrder": 3, "stepId": 99}]})
+        self.workout["ownerId"] = 9
+        detail = self.invoke("get")["data"]["workout"]
+        self.assertNotIn("ownerId", detail)
+        args = {"name": "Variation", "distanceChanges": [{"stepOrder": 3, "distanceMeters": 600}]}
+        preview = self.invoke("duplicate", **args)
+        proposed = preview["data"]["workout"]
+        proposed_group = proposed["workoutSegments"][0]["workoutSteps"][1]
+        self.assertEqual(proposed_group["numberOfIterations"], 6)
+        self.assertNotIn("stepId", proposed_group["workoutSteps"][0])
+        self.assertEqual(proposed_group["workoutSteps"][0]["endConditionValue"], 600)
+        self.assertEqual(proposed_group["workoutSteps"][0]["targetValueOne"], interval["targetValueOne"])
+        self.assertEqual(steps[1]["workoutSteps"][0]["endConditionValue"], 400)
+        self.garmin.upload_workout.assert_not_called()
+        self.garmin.upload_workout.return_value = {"workoutId": 123}
+        self.garmin.get_workout_by_id.side_effect = [self.workout, {**proposed, "workoutId": 123}]
+        actual = self.invoke("duplicate", confirm=True, **args)
+        self.assertEqual(actual["data"]["workoutId"], 123)
+        self.garmin.upload_workout.assert_called_once_with(proposed)
+        self.garmin.client.put.assert_not_called()
+
+    def test_copy_rejects_reuse_of_source_name_and_invalid_distance_changes(self):
+        self.assertEqual(self.invoke("duplicate", name="Original", confirm=True)["status"], "workout_name_conflict")
+        result = self.invoke("duplicate", name="Copy", confirm=True,
+                             distanceChanges=[{"stepOrder": 1, "distanceMeters": 600}])
+        self.assertEqual(result["status"], "invalid_input")
+        self.garmin.upload_workout.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

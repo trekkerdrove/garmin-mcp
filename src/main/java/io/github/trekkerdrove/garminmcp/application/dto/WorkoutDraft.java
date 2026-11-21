@@ -15,6 +15,14 @@ public record WorkoutDraft(String name, Sport sport, List<Step> steps) {
         }
     }
 
+    public record DistanceChange(int stepOrder, int distanceMeters) {
+        public DistanceChange {
+            if (stepOrder < 1 || distanceMeters < 1 || distanceMeters > 1_000_000) {
+                throw new IllegalArgumentException("Invalid workout distance change");
+            }
+        }
+    }
+
     public record Step(Kind kind, @Nullable Integer durationSeconds, @Nullable Integer distanceMeters,
                        @Nullable Integer heartRateZone, @Nullable PaceSecondsPerKm paceSecondsPerKm) {
         public Step {
