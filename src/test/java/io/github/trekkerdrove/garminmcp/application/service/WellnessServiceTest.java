@@ -137,6 +137,55 @@ class WellnessServiceTest {
     }
 
     @Test
+    void undatedSleepPlaceholderKeepsSixNightsAndTheirRespiration() {
+        String placeholder = """
+                {"calendarDate":null,"sleepTimeSeconds":null,"deepSleepSeconds":null,"averageRespirationValue":null,
+                 "sleepStartTimestampGMT":null,"sleepEndTimestampGMT":null,
+                 "sleepNeed":{"calendarDate":"2025-01-01","baseline":480,"actual":480},
+                 "nextSleepNeed":{"calendarDate":"2025-01-02","baseline":480}}
+                """;
+        var nights = new ArrayList<String>();
+        var days = new ArrayList<String>();
+        nights.add(placeholder);
+        for (LocalDate day = LocalDate.parse(DAY); !day.isAfter(LocalDate.parse("2025-01-07")); day = day.plusDays(1)) {
+            days.add("""
+                    {"calendarDate":"%s","respiration":{"avgValue":17}}
+                    """.formatted(day));
+            if (!day.toString().equals(DAY)) {
+                nights.add("""
+                        {"calendarDate":"%s","sleepTimeSeconds":24000,"averageRespirationValue":13}
+                        """.formatted(day));
+            }
+        }
+        http.fixtures.put(H6, placeholder);
+        http.fixtures.put(H7, "[" + String.join(",", nights) + "]");
+        http.fixtures.put(H2, "{\"data\":[" + String.join(",", days) + "]}");
+
+        var single = report(View.SLEEP, DAY, null, Options.BASIC);
+        assertThat(single.status()).isEqualTo("no_data");
+        assertThat(data(single).path("missingDates")).isEqualTo(JSON.readTree("[\"2025-01-01\"]"));
+
+        var sleep = report(View.SLEEP, DAY, "2025-01-07", Options.BASIC);
+        assertThat(sleep.status()).isEqualTo("ok");
+        assertThat(data(sleep).path("measuredDays").asInt()).isEqualTo(6);
+        assertThat(data(sleep).path("missingDates")).isEqualTo(JSON.readTree("[\"2025-01-01\"]"));
+        assertThat(data(sleep).has("unknownDates")).isFalse();
+        assertThat(data(sleep).path("observations")).hasSize(6).allSatisfy(night ->
+                assertThat(night.at("/values/sleepTimeSeconds").asInt()).isEqualTo(24000));
+
+        var respiration = report(View.RESPIRATION, DAY, "2025-01-07", Options.BASIC);
+        assertThat(respiration.status()).isEqualTo("ok");
+        var respirationData = data(respiration);
+        assertThat(respirationData.has("enrichmentUnavailable")).isFalse();
+        var observations = respirationData.path("observations");
+        assertThat(observations).hasSize(7).allSatisfy(day ->
+                assertThat(day.at("/values/daily/avgValue").asInt()).isEqualTo(17));
+        assertThat(observations.get(0).at("/values/sleep").isMissingNode()).isTrue();
+        assertThat(observations).filteredOn(day -> day.at("/values/sleep").isObject()).hasSize(6)
+                .allSatisfy(day -> assertThat(day.at("/values/sleep/averageRespirationValue").asInt()).isEqualTo(13));
+    }
+
+    @Test
     void vo2CarriesOnlyMeasurementsInRangeAndKeepsSourceDate() {
         http.fixtures.put(H15, """
                 [{"cycling":{"calendarDate":"2025-01-01","vo2MaxValue":45}},

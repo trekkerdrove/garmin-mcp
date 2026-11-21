@@ -177,12 +177,16 @@ public final class GarminWellnessReader implements WellnessReader {
 
     private static Map<String, Object> sleep(JsonNode item, boolean detail) {
         var result = fields(item, "sleepTimeSeconds napTimeSeconds deepSleepSeconds lightSleepSeconds remSleepSeconds awakeSleepSeconds unmeasurableSleepSeconds awakeCount avgSleepStress averageSpO2Value lowestSpO2Value highestSpO2Value sleepStartTimestampLocal sleepEndTimestampLocal");
+        boolean dated = item.hasNonNull("calendarDate");
         add(result, "scores", namedFields(item.path("sleepScores"), "value qualifierKey", List.of("overall","duration","quality","recovery","deep","light","rem","awakeTime","interruptions","awakenings","restlessness","stress")));
-        add(result, "need", fields(item.path("sleepNeed"), "calendarDate baseline actual recommendedBedtimeStartMins recommendedBedtimeEndMins"));
         add(result, "alignment", fields(item.path("sleepAlignment"), "sleepNeedBaselineMins optimalSleepWindowStartMins optimalSleepWindowEndMins status"));
-        if (detail) {
+        if (detail || !dated) {
             result.putAll(fields(item, "averageRespirationValue lowestRespirationValue highestRespirationValue avgHeartRate"));
             projectList(result, "naps", item.path("dailyNapDTOS"), "napTimeSec napStartTimestampGMT napEndTimestampGMT", 16);
+        }
+        // Garmin can return sleep-need recommendations without a sleep observation.
+        if (dated) {
+            add(result, "need", fields(item.path("sleepNeed"), "calendarDate baseline actual recommendedBedtimeStartMins recommendedBedtimeEndMins"));
         }
         return result;
     }
