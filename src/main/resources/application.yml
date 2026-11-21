@@ -16,6 +16,12 @@ spring:
           completion: false
 garmin:
   api-key: ${GARMIN_API_KEY:}
+  workouts:
+    enabled: ${GARMIN_WORKOUT_WRITES_ENABLED:false}
+    python: ${GARMIN_WORKOUT_PYTHON:/opt/garmin-python/bin/python}
+    script: ${GARMIN_WORKOUT_SCRIPT:scripts/garmin_workout_bridge.py}
+    token-directory: ${GARMIN_CONNECT_TOKEN_DIR:}
+    session-file: ${GARMIN_CONNECT_SESSION_FILE:}
 mcp:
   public-url: ${MCP_PUBLIC_URL:}
   oauth:

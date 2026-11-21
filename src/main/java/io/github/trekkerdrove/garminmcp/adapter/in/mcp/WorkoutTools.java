@@ -1,0 +1,34 @@
+package io.github.trekkerdrove.garminmcp.adapter.in.mcp;
+
+import java.util.List;
+import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
+import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
+import io.github.trekkerdrove.garminmcp.application.service.CreateWorkout;
+import org.springframework.ai.mcp.annotation.McpTool;
+import org.springframework.ai.mcp.annotation.McpToolParam;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
+
+@Component
+@ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
+class WorkoutTools {
+    private final CreateWorkout createWorkout;
+
+    WorkoutTools(CreateWorkout createWorkout) {
+        this.createWorkout = createWorkout;
+    }
+
+    @McpTool(name = "garmin_create_workout",
+            description = "Preview or save a structured workout in the Garmin Connect library. "
+                    + "Show the preview and obtain approval before calling again with confirm=true. "
+                    + "An identical workout with the same name is reused. A different workout with that name is left intact.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = false, destructiveHint = false, idempotentHint = false))
+    public ToolResult create(
+            @McpToolParam(description = "Workout name, up to 120 characters.") String name,
+            @McpToolParam(description = "Garmin sport: running, walking or cycling.") WorkoutDraft.Sport sport,
+            @McpToolParam(description = "1 to 50 ordered steps. Each has a kind (warmup, interval, recovery, cooldown), "
+                    + "exactly one of durationSeconds or distanceMeters, and an optional heartRateZone (1–5).") List<WorkoutDraft.Step> steps,
+            @McpToolParam(required = false, description = "Default false. Set true only after the user approves the workout.") Boolean confirm) {
+        return ToolResult.run(() -> createWorkout.execute(new WorkoutDraft(name, sport, steps), Boolean.TRUE.equals(confirm)));
+    }
+}

@@ -1,6 +1,6 @@
 # garmin-mcp
 
-Serveur Spring Boot MCP en lecture seule pour un compte Garmin Connect personnel. Le catalogue expose **36 outils** pour interroger les activités, la santé, la performance, les suivis personnels et les fichiers FIT du compte. Les noms, les usages et les endpoints officiels figurent dans le [catalogue des outils](_bmad-output/specs/spec-garmin-mcp-tools/catalogue-outils.md).
+Serveur Spring Boot MCP pour un compte Garmin Connect personnel. Le catalogue expose **36 outils de lecture** pour interroger les activités, la santé, la performance, les suivis personnels et les fichiers FIT du compte. Les noms, les usages et les endpoints officiels figurent dans le [catalogue des outils](_bmad-output/specs/spec-garmin-mcp-tools/catalogue-outils.md).
 
 | Exemple de question | Outil | Arguments MCP |
 | --- | --- | --- |
@@ -62,3 +62,23 @@ Le service lit le port `PORT` fourni par Render. Configure `/health` comme sonde
 les quatre variables dans **Environment**. Pour WorkOS AuthKit, active CIMD et déclare
 `MCP_PUBLIC_URL` comme *Resource Indicator*. Dans ChatGPT web, enregistre cette URL comme
 serveur MCP personnalisé et sélectionne **OAuth**.
+
+## Créer un entraînement
+
+`garmin_create_workout` enregistre une séance dans la bibliothèque Garmin Connect. Il accepte la course, la marche et le vélo, avec 1 à 50 étapes de durée ou de distance et une zone de fréquence cardiaque facultative. Le premier appel prévisualise les étapes. Passe `confirm: true` après validation pour enregistrer la séance et la relire. Une séance identique portant le même nom est réutilisée. Pour une séance différente, choisis un autre nom.
+
+```json
+{
+  "name": "Fractionné 400 m",
+  "sport": "running",
+  "steps": [
+    {"kind": "warmup", "durationSeconds": 600},
+    {"kind": "interval", "distanceMeters": 400, "heartRateZone": 3},
+    {"kind": "cooldown", "durationSeconds": 300}
+  ]
+}
+```
+
+Le 37ᵉ outil est disponible quand `GARMIN_WORKOUT_WRITES_ENABLED=true`. Génère une session en Terminal avec `uv run --script scripts/prototype_garmin_workout.py login --token-dir ~/.garmin-connect-workouts` sur ton poste. En local, installe `garminconnect==0.3.2` dans un environnement Python et indique son exécutable avec `GARMIN_WORKOUT_PYTHON`. Renseigne `GARMIN_CONNECT_TOKEN_DIR` avec le dossier privé de la session. Le serveur compare une activité récente à la Personal API avant la création pour vérifier que les deux accès visent le même compte.
+
+L’image Docker embarque le client Python. Sur Render, ajoute le fichier de la session dédiée aux **Secret Files**, puis règle `GARMIN_CONNECT_SESSION_FILE=/etc/secrets/garmin_tokens.json` et active l’écriture. Le serveur garde une copie privée pour renouveler la session pendant son exécution. Le système de fichiers de Render Free est éphémère. Remplace le fichier secret si Garmin refuse la session après un redémarrage. L’adaptateur utilise l’API interne Garmin Connect, dont les réponses et le mécanisme de connexion peuvent évoluer.

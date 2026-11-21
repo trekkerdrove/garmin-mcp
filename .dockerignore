@@ -2,5 +2,7 @@
 !pom.xml
 !src/
 !src/**
+!scripts/
+!scripts/garmin_workout_bridge.py
 **/.env
 **/.env.*
