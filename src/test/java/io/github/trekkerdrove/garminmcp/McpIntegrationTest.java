@@ -8,7 +8,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.nimbusds.jose.JOSEObjectType;
@@ -36,6 +39,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestTemplate;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -143,7 +147,110 @@ class McpIntegrationTest {
                 .isEqualTo(JSON.readTree("{\"status\":\"connected\",\"hasActivity\":false}"));
         assertThat(TOKEN_REQUESTS).hasValue(1);
         assertThat(ACTIVITY_REQUESTS).hasValue(2);
+        exerciseCatalog(JSON.readTree(tools.body()).path("result").path("tools"), ownerToken);
         oauth.verify();
+    }
+
+    private void exerciseCatalog(JsonNode tools, String token) throws Exception {
+        var names = new ArrayList<String>();
+        for (var tool : tools) {
+            String name = tool.path("name").asString();
+            names.add(name);
+            assertThat(tool.path("annotations").path("readOnlyHint").asBoolean()).as(name).isTrue();
+            assertThat(tool.path("annotations").path("destructiveHint").asBoolean(true)).as(name).isFalse();
+        }
+        assertThat(names).containsExactlyInAnyOrderElementsOf(CatalogFixture.CATALOG).hasSize(36).doesNotHaveDuplicates();
+
+        int before = CatalogFixture.REQUESTS.get();
+        assertThat(call("garmin_get_activity", Map.of("activityId", -1), token).path("status").asString())
+                .isEqualTo("invalid_input");
+        assertThat(call("garmin_get_weight", Map.of("startDate", "2025-02-30"), token).path("status").asString())
+                .isEqualTo("invalid_input");
+        assertThat(CatalogFixture.REQUESTS).hasValue(before);
+
+        for (var tool : tools) {
+            String name = tool.path("name").asString();
+            if (name.equals("garmin_check_connection")) {
+                continue;
+            }
+            var properties = tool.path("inputSchema").path("properties");
+            var args = new LinkedHashMap<String, Object>();
+            if (properties.has("activityId")) args.put("activityId", 42);
+            for (String field : new String[]{"date", "startDate", "endDate"}) {
+                if (properties.has(field)) args.put(field, CatalogFixture.DAY);
+            }
+            JsonNode result = call(name, args, token);
+            String expected = switch (name) {
+                case "garmin_get_wellness_trends", "garmin_get_hrv",
+                     "garmin_get_stress", "garmin_get_hydration", "garmin_get_body_battery",
+                     "garmin_get_spo2", "garmin_get_fitness_age", "garmin_get_vo2max", "garmin_get_heart_rate_zones",
+                     "garmin_get_respiration", "garmin_get_activity_strength_summary" -> "no_data";
+                default -> "ok";
+            };
+            assertThat(result.path("status").asString()).as("%s %s", name, result).isEqualTo(expected);
+            var data = result.path("data");
+            switch (name) {
+                case "running_distance" -> assertThat(data.path("distanceKm").asDouble()).isEqualTo(5);
+                case "compare_sleep_by_training_day" -> assertThat(data.at("/training/meanSleepSeconds").asInt()).isEqualTo(24000);
+                case "garmin_get_daily_summary", "garmin_get_steps" -> assertThat(data.at("/observations/0/values/totalSteps").asInt(-1)).isZero();
+                case "garmin_get_heart_rate" -> assertThat(data.at("/observations/0/values/restingHeartRate").asInt()).isEqualTo(58);
+                case "garmin_get_wellness_sessions" -> {
+                    var session = data.at("/sessions/0");
+                    assertThat(session.path("date").asString()).isEqualTo(CatalogFixture.DAY);
+                    assertThat(session.at("/metrics/0/avgValue").asDouble()).isEqualTo(64.5);
+                    assertThat(session.at("/zones/0/millisInZone").asInt()).isEqualTo(3000);
+                }
+                case "garmin_get_power_curve" -> assertThat(data.at("/efforts/60s/value").asInt()).isEqualTo(300);
+                case "garmin_get_fit_samples", "garmin_analyze_activity_file" -> assertThat(data.path("matchedRows").asInt()).isPositive();
+                case "garmin_get_profile_settings" -> assertThat(data.at("/settings/timeZone").asString()).isEqualTo("Europe/Paris");
+            }
+        }
+
+        call("garmin_get_hrv", Map.of("startDate", CatalogFixture.DAY, "endDate", "2025-04-02"), token);
+        var weights = call("garmin_get_weight", Map.of("startDate", CatalogFixture.DAY), token).path("data").path("rows");
+        assertThat(weights.size()).isEqualTo(2);
+        assertThat(weights.path(0).path("weightKg").asDouble()).isEqualTo(71.5);
+        var summary = call("garmin_get_weight", Map.of("startDate", CatalogFixture.DAY, "view", "summary"), token);
+        assertThat(summary.path("data").path("rows").path(0).path("latestWeightKg").asDouble()).isEqualTo(72);
+        var meal = call("garmin_get_nutrition", Map.of("startDate", CatalogFixture.DAY, "mealId", 7), token).path("data");
+        assertThat(meal.path("totals").path("calories").asInt()).isEqualTo(200);
+        assertThat(meal.path("foodCount").asInt()).isEqualTo(1);
+        var cycleArgs = Map.of("startDate", CatalogFixture.DAY, "view", "day", "details", true);
+        assertThat(call("garmin_get_cycle", cycleArgs, token).toString()).contains("light").doesNotContain("userProfilePk");
+        assertThat(call("garmin_get_activity", Map.of("activityId", 404), token).path("status").asString()).isEqualTo("not_found");
+        assertThat(call("garmin_get_activity", Map.of("activityId", 429), token).path("status").asString()).isEqualTo("garmin_rate_limited");
+        assertThat(call("garmin_get_fit_samples", Map.of("activityId", 413), token).path("status").asString())
+                .isEqualTo("fit_limit_exceeded");
+        assertThat(call("garmin_get_fit_samples", Map.of("activityId", 414), token).path("status").asString())
+                .isEqualTo("fit_limit_exceeded");
+
+        var filters = Map.of("search", "a & b", "requiredField", java.util.List.of("distance", "duration"));
+        var page = call("garmin_search_activities", Map.of("limit", 1, "filters", filters), token);
+        assertThat(page.path("status").asString()).isEqualTo("truncated");
+        assertThat(page.at("/data/nextOffset").asInt()).isEqualTo(1);
+        assertThat(page.at("/data/activities/0/activityId").asInt()).isEqualTo(45);
+        var next = call("garmin_search_activities", Map.of("limit", 1, "offset", 1, "filters", filters), token);
+        assertThat(next.at("/data/activities/0/activityId").asInt()).isEqualTo(46);
+        int exchanges = TOKEN_REQUESTS.get();
+        assertThat(call("garmin_get_activity", Map.of("activityId", 403), token).path("status").asString())
+                .isEqualTo("garmin_access_denied");
+        assertThat(call("garmin_get_activity", Map.of("activityId", 401), token).path("status").asString())
+                .isEqualTo("garmin_access_denied");
+        assertThat(TOKEN_REQUESTS).hasValue(exchanges);
+        assertThat(call("garmin_get_activity", Map.of("activityId", 42), token).path("status").asString()).isEqualTo("ok");
+        assertThat(TOKEN_REQUESTS).hasValue(exchanges + 1);
+        assertThat(CatalogFixture.ROUTES).as("Distinct official GET endpoints reached via MCP").hasSize(28);
+    }
+
+    private JsonNode call(String name, Map<String, ?> arguments, String token) throws Exception {
+        String body = JSON.writeValueAsString(Map.of("jsonrpc", "2.0", "id", 3, "method", "tools/call",
+                "params", Map.of("name", name, "arguments", arguments)));
+        var reply = mcp(body, token, null);
+        assertThat(reply.statusCode()).as(name).isEqualTo(200);
+        assertThat(reply.body()).as(name).doesNotContain("PRIVATE_FIELD", "fake-personal-key");
+        var content = JSON.readTree(reply.body()).path("result");
+        assertThat(content.path("isError").asBoolean(false)).as("%s %s", name, content).isFalse();
+        return JSON.readTree(toolText(reply.body()));
     }
 
     private static String toolText(String body) {
@@ -188,16 +295,32 @@ class McpIntegrationTest {
                 reply(exchange, 200, "text/plain", garminToken);
             });
             server.createContext("/activitylist-service/activities/search/activities", exchange -> {
-                if (!"GET".equals(exchange.getRequestMethod())
-                        || !("Bearer " + garminToken).equals(exchange.getRequestHeaders().getFirst("Authorization"))
-                        || !"start=0&limit=1".equals(exchange.getRequestURI().getQuery())) {
-                    reply(exchange, 400, "text/plain", "Unexpected request");
+                if (!CatalogFixture.allowed(exchange, garminToken)) {
+                    return;
+                }
+                CatalogFixture.ROUTES.add("/activitylist-service/activities/search/activities");
+                String query = exchange.getRequestURI().getRawQuery();
+                if (query.contains("search=")) {
+                    if (!query.contains("search=a%20%26%20b") || !query.contains("requiredField=distance&requiredField=duration")) {
+                        reply(exchange, 400, "text/plain", "Incorrect search parameters");
+                        return;
+                    }
+                    int id = query.contains("start=1") ? 46 : 45;
+                    reply(exchange, 200, "application/json", """
+                            [{"activityId":%d,"startTimeLocal":"2025-04-01T09:00:00","activityType":{"typeKey":"walking"}}]""".formatted(id));
+                    return;
+                }
+                if (!"start=0&limit=1".equals(exchange.getRequestURI().getQuery())) {
+                    reply(exchange, 200, "application/json", """
+                            [{"activityId":42,"startTimeLocal":"2025-04-01T19:30:00","activityType":{"typeKey":"running"},
+                            "distance":5000,"duration":1800,"maxAvgPower_60":300,"hrTimeInZone_1":55}]""");
                     return;
                 }
                 String activities = ACTIVITY_REQUESTS.incrementAndGet() == 1
                         ? "[{\"activityName\":\"private-activity-name\"}]" : "[]";
                 reply(exchange, 200, "application/json", activities);
             });
+            CatalogFixture.register(server, garminToken);
             server.start();
             return server;
         } catch (Exception error) {

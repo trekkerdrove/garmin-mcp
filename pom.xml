@@ -29,6 +29,11 @@
     </dependencyManagement>
     <dependencies>
         <dependency>
+            <groupId>com.garmin</groupId>
+            <artifactId>fit</artifactId>
+            <version>21.212.0</version>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
         </dependency>

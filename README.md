@@ -1,8 +1,17 @@
 # garmin-mcp
 
-Serveur Spring Boot MCP en lecture seule pour un compte Garmin Connect personnel. L’outil
-`garmin_check_connection` demande au plus une activité et indique uniquement si Garmin répond
-et s’il a renvoyé une activité.
+Serveur Spring Boot MCP en lecture seule pour un compte Garmin Connect personnel. Le catalogue expose **36 outils** pour interroger les activités, la santé, la performance, les suivis personnels et les fichiers FIT du compte. Les noms, les usages et les endpoints officiels figurent dans le [catalogue des outils](_bmad-output/specs/spec-garmin-mcp-tools/catalogue-outils.md).
+
+| Exemple de question | Outil | Arguments MCP |
+| --- | --- | --- |
+| Quelle distance ai-je couru la semaine dernière ? | `running_distance` | `{}` |
+| Est-ce que je dors plus après une journée avec entraînement ? | `compare_sleep_by_training_day` | `{}` pour les 28 derniers jours terminés |
+| Quelles pesées ai-je enregistrées le 1er avril ? | `garmin_get_weight` | `{"startDate":"2025-04-01"}` |
+| Quels échantillons de puissance cette activité contient-elle ? | `garmin_get_fit_samples` | `{"activityId":42,"metrics":["powerW"],"limit":50}` |
+
+Le client découvre les paramètres, les unités disponibles et les plafonds via `tools/list`. Les outils renvoient `status` et `data`. Les valeurs `ok`, `no_data` et `truncated` indiquent respectivement une lecture exploitable, une absence de mesure ou une lecture limitée. Une limitation de débit Garmin renvoie `garmin_rate_limited`. La sonde historique `garmin_check_connection` renvoie toujours son statut et l’indicateur `hasActivity`.
+
+La semaine de course va du lundi au dimanche dans `Europe/Paris`. La comparaison de sommeil rattache la nuit au jour précédant le réveil. Les pesées sont exprimées en kg, les objectifs de poids en g. Pour les analyses FIT, le serveur accepte une archive à la fois, de 4 Mio compressés et 8 Mio décompressés au maximum. Une requête concurrente reçoit `fit_busy`. Le serveur expose au plus 200 lignes par analyse FIT et garde les fichiers en mémoire pour la durée de l’appel.
 
 ## Lancer en local
 
