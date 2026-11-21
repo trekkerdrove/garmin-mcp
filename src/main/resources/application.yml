@@ -1,0 +1,23 @@
+server:
+  port: ${PORT:8080}
+spring:
+  config:
+    import: optional:file:.env[.properties]
+  ai:
+    mcp:
+      server:
+        name: garmin-mcp
+        protocol: STATELESS
+        streamable-http:
+          mcp-endpoint: /mcp
+        capabilities:
+          resource: false
+          prompt: false
+          completion: false
+garmin:
+  api-key: ${GARMIN_API_KEY:}
+mcp:
+  public-url: ${MCP_PUBLIC_URL:}
+  oauth:
+    issuer: ${MCP_OAUTH_ISSUER:}
+    owner-subject: ${MCP_OAUTH_OWNER_SUBJECT:}
