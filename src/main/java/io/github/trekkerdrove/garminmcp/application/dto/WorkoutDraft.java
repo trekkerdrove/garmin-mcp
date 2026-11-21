@@ -7,13 +7,21 @@ public record WorkoutDraft(String name, Sport sport, List<Step> steps) {
     public enum Sport { running, walking, cycling }
     public enum Kind { warmup, interval, recovery, cooldown }
 
+    public record PaceSecondsPerKm(int fast, int slow) {
+        public PaceSecondsPerKm {
+            if (fast <= 0 || slow < fast) {
+                throw new IllegalArgumentException("Pace bounds must be positive and ordered fastest first");
+            }
+        }
+    }
+
     public record Step(Kind kind, @Nullable Integer durationSeconds, @Nullable Integer distanceMeters,
-                       @Nullable Integer heartRateZone) {
+                       @Nullable Integer heartRateZone, @Nullable PaceSecondsPerKm paceSecondsPerKm) {
         public Step {
             if (kind == null || (durationSeconds == null) == (distanceMeters == null)
                     || (durationSeconds != null && (durationSeconds < 1 || durationSeconds > 86_400))
                     || (distanceMeters != null && (distanceMeters < 1 || distanceMeters > 1_000_000))
-                    || (heartRateZone != null && (heartRateZone < 1 || heartRateZone > 5))) {
+                    || (heartRateZone != null && (heartRateZone < 1 || heartRateZone > 5 || paceSecondsPerKm != null))) {
                 throw new IllegalArgumentException("Invalid workout step");
             }
         }
@@ -24,6 +32,9 @@ public record WorkoutDraft(String name, Sport sport, List<Step> steps) {
         steps = validSteps(steps);
         if (sport == null) {
             throw new IllegalArgumentException("Missing sport");
+        }
+        if (sport == Sport.cycling && steps.stream().anyMatch(step -> step.paceSecondsPerKm() != null)) {
+            throw new IllegalArgumentException("Pace targets require running or walking");
         }
     }
 

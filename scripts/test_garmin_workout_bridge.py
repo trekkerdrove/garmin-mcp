@@ -1,4 +1,5 @@
 import unittest
+from copy import deepcopy
 from unittest.mock import Mock
 
 from garmin_workout_bridge import GarminConnectConnectionError, build_payload, publish
@@ -30,6 +31,37 @@ class WorkoutBridgeTest(unittest.TestCase):
         self.garmin.get_workouts.return_value = []
         self.assertEqual(self.invoke("delete", confirm=True)["status"], "workout_not_found")
         self.garmin.delete_workout.assert_not_called()
+
+    def test_reuse_compares_both_stored_pace_bounds(self):
+        draft = {"name": "Original", "sport": "running", "steps": [
+            {"kind": "interval", "distanceMeters": 1000, "paceSecondsPerKm": {"fast": 265, "slow": 275}}]}
+        saved = build_payload(draft)
+        step = saved["workoutSegments"][0]["workoutSteps"][0]
+        self.assertEqual(step["targetType"], {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone"})
+        self.assertAlmostEqual(step["targetValueOne"], 1000 / 265)
+        self.assertAlmostEqual(step["targetValueTwo"], 1000 / 275)
+        self.garmin.get_workout_by_id.return_value = saved
+        step["targetValueOne"] = round(step["targetValueOne"], 6)
+        self.assertEqual(self.invoke("create", workout=draft)["status"], "already_exists")
+        for field in ("targetValueOne", "targetValueTwo"):
+            with self.subTest(field=field):
+                changed = deepcopy(saved)
+                changed["workoutSegments"][0]["workoutSteps"][0][field] = 1000 / 270
+                self.garmin.get_workout_by_id.return_value = changed
+                self.assertEqual(self.invoke("create", workout=draft)["status"], "workout_name_conflict")
+        self.garmin.upload_workout.assert_not_called()
+
+    def test_update_rejects_dropped_pace_and_cycling_target(self):
+        steps = [{"kind": "interval", "durationSeconds": 60, "paceSecondsPerKm": {"fast": 270, "slow": 270}}]
+        saved = dict(build_payload({"name": "Original", "sport": "running", "steps": steps}), workoutId=42)
+        del saved["workoutSegments"][0]["workoutSteps"][0]["targetValueTwo"]
+        self.garmin.get_workout_by_id.side_effect = [self.workout, saved]
+        self.assertEqual(self.invoke("update", steps=steps, confirm=True)["status"], "workout_write_unconfirmed")
+        self.garmin.get_workout_by_id.side_effect = None
+        self.workout["sportType"]["sportTypeKey"] = "cycling"
+        self.garmin.client.put.reset_mock()
+        self.assertEqual(self.invoke("update", steps=steps, confirm=True)["status"], "workout_unsupported")
+        self.garmin.client.put.assert_not_called()
 
     def test_rename_preserves_other_fields_and_requires_readback(self):
         renamed = {**self.workout, "workoutName": "New"}

@@ -21,6 +21,7 @@ def build_payload(draft):
     for order, entry in enumerate(draft["steps"], 1):
         timed = entry.get("durationSeconds") is not None
         zone = entry.get("heartRateZone")
+        pace = entry.get("paceSecondsPerKm")
         kind = entry["kind"]
         step = {
             "type": "ExecutableStepDTO",
@@ -28,19 +29,29 @@ def build_payload(draft):
             "stepType": {"stepTypeId": KINDS[kind], "stepTypeKey": kind},
             "endCondition": {"conditionTypeId": 2 if timed else 3, "conditionTypeKey": "time" if timed else "distance"},
             "endConditionValue": entry["durationSeconds"] if timed else entry["distanceMeters"],
-            "targetType": {
-                "workoutTargetTypeId": 1 if zone is None else 4,
-                "workoutTargetTypeKey": "no.target" if zone is None else "heart.rate.zone",
-            },
+            "targetType": {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target"},
         }
         if zone is not None:
+            step["targetType"] = {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone"}
             step["zoneNumber"] = zone
+        elif pace is not None:
+            step["targetType"] = {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone"}
+            step["targetValueOne"] = 1000 / pace["fast"]
+            step["targetValueTwo"] = 1000 / pace["slow"]
         steps.append(step)
     return {
         "workoutName": draft["name"],
         "sportType": sport,
         "workoutSegments": [{"segmentOrder": 1, "sportType": sport, "workoutSteps": steps}],
     }
+
+
+def pace_bounds(step):
+    if step["targetType"]["workoutTargetTypeKey"] == "pace.zone":
+        # Garmin may round stored speeds. Compare in the MCP's unit of whole seconds/km.
+        return tuple(round(1000 / value) if value and value > 0 else None
+                     for value in (step.get("targetValueOne"), step.get("targetValueTwo")))
+    return None
 
 
 def workout_shape(workout):
@@ -52,7 +63,7 @@ def workout_shape(workout):
         workout["sportType"]["sportTypeKey"],
         tuple(
             (s["type"], s["stepType"]["stepTypeKey"], s["endCondition"]["conditionTypeKey"],
-             s["endConditionValue"], s["targetType"]["workoutTargetTypeKey"], s.get("zoneNumber"))
+             s["endConditionValue"], s["targetType"]["workoutTargetTypeKey"], s.get("zoneNumber"), pace_bounds(s))
             for s in segments[0]["workoutSteps"]
         ),
     )
@@ -146,6 +157,8 @@ def edit_existing(garmin, operation, request):
             segments = current["workoutSegments"]
             if sport not in SPORTS or len(segments) != 1:
                 return {"status": "workout_unsupported"}
+            if sport == "cycling" and any(step.get("paceSecondsPerKm") is not None for step in request["steps"]):
+                return {"status": "workout_unsupported"}
             new = build_payload({"name": name, "sport": sport, "steps": request["steps"]})
             payload["workoutSegments"] = [{**segments[0], "workoutSteps": new["workoutSegments"][0]["workoutSteps"]}]
     if request["confirm"] is not True:
@@ -184,7 +197,10 @@ def publish(garmin, request):
 
 
 def main(token_dir):
-    request = json.loads(sys.stdin.buffer.read(8193))
+    raw = sys.stdin.buffer.read(16_385)
+    if len(raw) > 16_384:
+        return {"status": "workout_rejected"}
+    request = json.loads(raw)
     token_file = Path(token_dir) / "garmin_tokens.json"
     if not token_file.is_file() or token_file.stat().st_mode & 0o077:
         return {"status": "workout_session_unavailable"}

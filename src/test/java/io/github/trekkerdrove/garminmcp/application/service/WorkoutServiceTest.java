@@ -6,6 +6,7 @@ import java.util.Map;
 import io.github.trekkerdrove.garminmcp.application.dto.GarminFailure;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft.Kind;
+import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft.PaceSecondsPerKm;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft.Sport;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft.Step;
 import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader;
@@ -26,7 +27,7 @@ class WorkoutServiceTest {
     private final WorkoutPublisher publisher = mock(WorkoutPublisher.class);
     private final WorkoutService service = new WorkoutService(activities, publisher);
     private final WorkoutDraft draft = new WorkoutDraft("Test", Sport.running, List.of(
-            new Step(Kind.warmup, 120, null, null), new Step(Kind.interval, null, 400, 3)));
+            new Step(Kind.warmup, 120, null, null, null), new Step(Kind.interval, null, 400, 3, null)));
 
     @Test
     void previewsWithoutReadingEitherGarminApi() {
@@ -38,10 +39,24 @@ class WorkoutServiceTest {
 
     @Test
     void rejectsAmbiguousStepsAndMalformedWorkouts() {
-        assertThatThrownBy(() -> new Step(Kind.interval, 60, 400, 3)).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new Step(Kind.interval, null, 400, 6)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new Step(Kind.interval, 60, 400, 3, null)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new Step(Kind.interval, null, 400, 6, null)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new WorkoutDraft(" ", Sport.walking, draft.steps()))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void validatesPaceBoundsAndPreviewsTheRequestedTarget() {
+        var range = new PaceSecondsPerKm(265, 275);
+        var step = new Step(Kind.interval, null, 1000, null, range);
+        var workout = new WorkoutDraft("Pace", Sport.running, List.of(step));
+        assertThat(service.create(workout, false).data()).isEqualTo(workout);
+        assertThat(new PaceSecondsPerKm(270, 270).fast()).isEqualTo(270);
+        assertThatThrownBy(() -> new PaceSecondsPerKm(0, 270)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PaceSecondsPerKm(275, 265)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new Step(Kind.interval, 120, null, 3, range)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new WorkoutDraft("Bike", Sport.cycling, List.of(step))).isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(activities, publisher);
     }
 
     @Test

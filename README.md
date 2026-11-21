@@ -65,7 +65,7 @@ serveur MCP personnalisé et sélectionne **OAuth**.
 
 ## Gérer les entraînements
 
-`garmin_create_workout` enregistre une séance dans la bibliothèque Garmin Connect. Il accepte la course, la marche et le vélo, avec 1 à 50 étapes de durée ou de distance et une zone de fréquence cardiaque facultative. Le premier appel prévisualise les étapes. Passe `confirm: true` après validation pour enregistrer la séance et la relire. Une séance identique portant le même nom est réutilisée. Pour une séance différente, choisis un autre nom.
+`garmin_create_workout` enregistre une séance dans la bibliothèque Garmin Connect. Il accepte la course, la marche et le vélo, avec 1 à 50 étapes de durée ou de distance. Chaque étape peut avoir une cible de fréquence cardiaque ou, en course et en marche, une cible d’allure. Les bornes `fast` et `slow` s’expriment en secondes par kilomètre. Pour une allure unique de 4 min 30 s/km, donne 270 aux deux bornes. Le premier appel prévisualise les étapes. Passe `confirm: true` après validation pour enregistrer la séance et la relire. Une séance identique portant le même nom est réutilisée. Pour une séance différente, choisis un autre nom.
 
 ```json
 {
@@ -73,7 +73,7 @@ serveur MCP personnalisé et sélectionne **OAuth**.
   "sport": "running",
   "steps": [
     {"kind": "warmup", "durationSeconds": 600},
-    {"kind": "interval", "distanceMeters": 400, "heartRateZone": 3},
+    {"kind": "interval", "distanceMeters": 400, "paceSecondsPerKm": {"fast": 265, "slow": 275}},
     {"kind": "cooldown", "durationSeconds": 300}
   ]
 }
