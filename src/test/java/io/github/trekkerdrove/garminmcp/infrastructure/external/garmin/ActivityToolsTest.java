@@ -74,6 +74,24 @@ class ActivityToolsTest {
     }
 
     @Test
+    void undatedSleepPlaceholdersLeaveNightsMissingWithoutDiscardingMeasuredNights() {
+        var withPlaceholder = service((route, query) -> route == A1 ? "[]" : """
+                [{"calendarDate":"2026-11-02","sleepTimeSeconds":3600},
+                 {"calendarDate":null,"sleepTimeSeconds":null,"sleepWindowConfirmed":false}]""");
+        var good = withPlaceholder.compareSleep("2026-11-01", "2026-11-02");
+        assertThat(good.status()).isEqualTo("ok");
+        var rest = JSON.valueToTree(good.data()).path("rest");
+        assertThat(rest.path("missingNights").asInt()).isOne();
+        assertThat(rest.path("measuredNights").asInt()).isOne();
+        assertThat(rest.path("meanSleepSeconds").asDouble()).isEqualTo(3600);
+
+        var undatedMeasurement = service((route, query) -> route == A1 ? "[]"
+                : "[{\"sleepTimeSeconds\":0,\"calendarDate\":null}]");
+        assertThat(ToolResult.run(() -> undatedMeasurement.compareSleep("2026-11-01", "2026-11-02")).status())
+                .isEqualTo("garmin_unavailable");
+    }
+
+    @Test
     void incompleteOrFailedReadsNeverEmitTotals() {
         var service = service((route, query) -> route == A4 ? TYPES : "[" +
                 String.join(",", java.util.Collections.nCopies(50, activity(1, 0,"running","2026-11-09", 20))) + "]");

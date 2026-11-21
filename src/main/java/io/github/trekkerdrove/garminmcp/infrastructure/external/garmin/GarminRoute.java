@@ -21,7 +21,7 @@ public enum GarminRoute {
     H11("/hrv-service/hrv/{calendarDate}", Shape.OBJECT),
     H12("/hrv-service/hrv/daily/{fromDate}/{toDate}", Shape.OBJECT),
     H13("/biometric-service/heartRateZones/v2", Shape.ARRAY),
-    H14("/fitnessage-service/fitnessage/v2/{calendarDate}", Shape.ARRAY),
+    H14("/fitnessage-service/fitnessage/v2/{calendarDate}", Shape.OBJECT_OR_ARRAY),
     H15("/metrics-service/metrics/maxmet/daily/{startDate}/{endDate}", Shape.ARRAY),
     H16("/weight-service/weight/all/{startDate}/{endDate}", Shape.ARRAY),
     H17("/weight-service/weight/range/{startDate}/{endDate}", Shape.OBJECT),
@@ -31,7 +31,11 @@ public enum GarminRoute {
     H21("/periodichealth-service/menstrualcycle/summary/{calendarDate}", Shape.OBJECT),
     P1("/userprofile-service/userprofile/settings", Shape.OBJECT);
 
-    enum Shape { ARRAY, OBJECT, BINARY }
+    enum Shape { ARRAY, OBJECT, OBJECT_OR_ARRAY, BINARY }
+
+    boolean allowsNoContent() {
+        return this == H11 || this == H12 || this == H20 || this == H21;
+    }
 
     final String path;
     final Shape shape;

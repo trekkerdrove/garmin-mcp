@@ -183,7 +183,7 @@ class McpIntegrationTest {
             String expected = switch (name) {
                 case "garmin_get_wellness_trends", "garmin_get_hrv",
                      "garmin_get_stress", "garmin_get_hydration", "garmin_get_body_battery",
-                     "garmin_get_spo2", "garmin_get_fitness_age", "garmin_get_vo2max", "garmin_get_heart_rate_zones",
+                     "garmin_get_spo2", "garmin_get_vo2max", "garmin_get_heart_rate_zones",
                      "garmin_get_respiration", "garmin_get_activity_strength_summary" -> "no_data";
                 default -> "ok";
             };
@@ -193,6 +193,7 @@ class McpIntegrationTest {
                 case "running_distance" -> assertThat(data.path("distanceKm").asDouble()).isEqualTo(5);
                 case "compare_sleep_by_training_day" -> assertThat(data.at("/training/meanSleepSeconds").asInt()).isEqualTo(24000);
                 case "garmin_get_daily_summary", "garmin_get_steps" -> assertThat(data.at("/observations/0/values/totalSteps").asInt(-1)).isZero();
+                case "garmin_get_fitness_age" -> assertThat(data.at("/observations/0/values/fitnessAge").asDouble()).isEqualTo(47.5);
                 case "garmin_get_heart_rate" -> assertThat(data.at("/observations/0/values/restingHeartRate").asInt()).isEqualTo(58);
                 case "garmin_get_wellness_sessions" -> {
                     var session = data.at("/sessions/0");
@@ -217,6 +218,11 @@ class McpIntegrationTest {
         assertThat(meal.path("foodCount").asInt()).isEqualTo(1);
         var cycleArgs = Map.of("startDate", CatalogFixture.DAY, "view", "day", "details", true);
         assertThat(call("garmin_get_cycle", cycleArgs, token).toString()).contains("light").doesNotContain("userProfilePk");
+        for (String view : java.util.List.of("day", "summary")) {
+            var empty = call("garmin_get_cycle", Map.of("startDate", "2000-01-02", "view", view), token);
+            assertThat(empty.path("status").asString()).isEqualTo("no_data");
+            assertThat(empty.at("/data/missingDates/0").asString()).isEqualTo("2000-01-02");
+        }
         assertThat(call("garmin_get_activity", Map.of("activityId", 404), token).path("status").asString()).isEqualTo("not_found");
         assertThat(call("garmin_get_activity", Map.of("activityId", 429), token).path("status").asString()).isEqualTo("garmin_rate_limited");
         assertThat(call("garmin_get_fit_samples", Map.of("activityId", 413), token).path("status").asString())

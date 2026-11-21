@@ -51,7 +51,9 @@ public final class GarminWellnessReader implements WellnessReader {
         JsonNode items = nestedDaily ? body.path("data")
                 : view == View.HRV && !single ? body.path("hrvSummaries") : body;
         boolean expectArray = nestedDaily || !single || switch (view) {
-            case STEPS, STRESS, HYDRATION, BATTERY, FITNESS_AGE, ZONES -> true;
+            case STEPS, STRESS, HYDRATION, BATTERY, ZONES -> true;
+            // H14 returns a singleton in production and an array in the published contract.
+            case FITNESS_AGE -> items.isArray();
             default -> false;
         };
         if (expectArray ? !items.isArray() : !items.isObject()) throw malformed();

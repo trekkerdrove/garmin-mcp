@@ -153,9 +153,13 @@ public class GarminActivities implements ActivityReader {
     public List<Night> sleep(LocalDate first, LocalDate last) {
         var nights = new ArrayList<Night>();
         for (JsonNode row : array(http.get(H7, Map.of("startDate", first, "endDate", last)))) {
-            LocalDate date = localDate(row.path("calendarDate").asString(""));
+            if (!row.isObject()) throw malformed();
             var duration = row.path("sleepTimeSeconds");
-            nights.add(new Night(date, duration.isIntegralNumber() && duration.asLong() >= 0 ? duration.asLong() : null));
+            // Garmin can return an undated placeholder when no main-sleep duration was measured.
+            if (duration.isNull() || duration.isMissingNode()) continue;
+            if (!duration.isIntegralNumber() || !duration.canConvertToLong() || duration.asLong() < 0) throw malformed();
+            LocalDate date = localDate(row.path("calendarDate").asString(""));
+            nights.add(new Night(date, duration.asLong()));
         }
         return nights;
     }

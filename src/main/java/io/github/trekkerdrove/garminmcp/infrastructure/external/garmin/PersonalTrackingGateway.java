@@ -30,9 +30,7 @@ public final class PersonalTrackingGateway implements GarminPersonalData, Garmin
             for (var day : body.path("dailyWeightSummaries")) {
                 var latest = day.path("latestWeight");
                 var row = fields(day, "numOfWeightEntries");
-                if (latest.path("weight").isNumber()) {
-                    row.put("latestWeightKg", latest.path("weight").numberValue());
-                }
+                measurementKg(latest).ifPresent(kg -> row.put("latestWeightKg", kg));
                 if (!row.isEmpty() && inRange(day.path("summaryDate"), start, end)) {
                     row.put("date", day.path("summaryDate").asString());
                     rows.add(row);
@@ -46,9 +44,7 @@ public final class PersonalTrackingGateway implements GarminPersonalData, Garmin
                 var row = view == WeightView.composition
                         ? fields(entry, "bmi", "bodyFat", "bodyWater", "boneMass", "muscleMass", "physiqueRating", "visceralFat", "metabolicAge")
                         : new LinkedHashMap<String, Object>();
-                if (entry.path("weight").isNumber()) {
-                    row.put("weightKg", entry.path("weight").numberValue());
-                }
+                measurementKg(entry).ifPresent(kg -> row.put("weightKg", kg));
                 if (!row.isEmpty()) {
                     row.putAll(fields(entry, "calendarDate", "timestampGMT"));
                     rows.add(row);
@@ -65,13 +61,22 @@ public final class PersonalTrackingGateway implements GarminPersonalData, Garmin
         var latest = body.path("previousDateWeight");
         for (var day : body.path("dailyWeightSummaries")) {
             var sameDay = day.path("latestWeight");
-            if (sameDay.path("weight").asDouble(0) > 0 && inRange(sameDay.path("calendarDate"), date, date)) {
+            if (measurementKg(sameDay).isPresent() && inRange(sameDay.path("calendarDate"), date, date)) {
                 latest = sameDay;
             }
         }
-        double kg = latest.path("weight").asDouble(0);
-        return inRange(latest.path("calendarDate"), LocalDate.of(1, 1, 1), date) && kg > 0 && Double.isFinite(kg)
-                ? OptionalDouble.of(kg) : OptionalDouble.empty();
+        return inRange(latest.path("calendarDate"), LocalDate.of(1, 1, 1), date)
+                ? measurementKg(latest) : OptionalDouble.empty();
+    }
+
+    private static OptionalDouble measurementKg(JsonNode measurement) {
+        var weight = measurement.path("weight");
+        if (!weight.isNumber() || !Double.isFinite(weight.asDouble()) || weight.asDouble() <= 0) {
+            return OptionalDouble.empty();
+        }
+        double value = weight.asDouble();
+        // Personal API documents kg; weight-service also returns grams for the same measurement.
+        return OptionalDouble.of(value >= 1_000 ? value / 1_000 : value);
     }
 
     @Override

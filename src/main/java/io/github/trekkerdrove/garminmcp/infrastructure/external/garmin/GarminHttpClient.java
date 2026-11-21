@@ -90,14 +90,19 @@ public class GarminHttpClient implements GarminActivityProbe, GarminArchive {
         }
         byte[] body = read(route, query, pathValues, JSON_BYTES);
         if (body == null) {
-            if (route == GarminRoute.H11 || route == GarminRoute.H12) {
+            if (route.allowsNoContent()) {
                 return NullNode.getInstance();
             }
             throw new GarminFailure("garmin_unavailable");
         }
         try {
             JsonNode value = JSON.readTree(body);
-            boolean valid = value != null && (route.shape == GarminRoute.Shape.ARRAY ? value.isArray() : value.isObject());
+            boolean valid = value != null && switch (route.shape) {
+                case ARRAY -> value.isArray();
+                case OBJECT -> value.isObject();
+                case OBJECT_OR_ARRAY -> value.isObject() || value.isArray();
+                case BINARY -> false;
+            };
             if (!valid) {
                 throw new GarminFailure("garmin_unavailable");
             }

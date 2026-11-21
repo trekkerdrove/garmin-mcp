@@ -10,6 +10,7 @@ import java.util.Map;
 import io.github.trekkerdrove.garminmcp.application.dto.GarminFailure;
 import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import io.github.trekkerdrove.garminmcp.application.port.out.GarminPersonalData.CycleView;
+import io.github.trekkerdrove.garminmcp.application.port.out.GarminPersonalData.WeightView;
 import io.github.trekkerdrove.garminmcp.application.service.PersonalTrackingService;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
@@ -54,6 +55,34 @@ class PersonalTrackingTest {
         assertThat(gateway.kilogramsOnOrBefore(date.minusDays(1))).hasValue(70);
         assertThat(gateway.kilogramsOnOrBefore(date.minusMonths(1))).isEmpty();
         assertThat(gateway.kilogramsOnOrBefore(date.plusYears(2))).hasValue(70);
+    }
+
+    @Test
+    void normalizesGramAndKilogramMeasurementsAcrossReadsAndHistoricalPowerLookup() {
+        var date = LocalDate.of(2025, 4, 1);
+        http.body = """
+                [{"calendarDate":"2025-04-01","weight":81500},{"calendarDate":"2025-04-01","weight":81.25}]""";
+        for (var view : List.of(WeightView.measurements, WeightView.composition)) {
+            assertThat(gateway.weights(date, date, view)).extracting(row -> row.get("weightKg"))
+                    .containsExactly(81.5, 81.25);
+        }
+        http.body = """
+                {"dailyWeightSummaries":[{"summaryDate":"2025-04-01","latestWeight":{"calendarDate":"2025-04-01","weight":81500}}],
+                 "previousDateWeight":{"calendarDate":"2025-03-30","weight":81250}}""";
+        assertThat(gateway.weights(date, date, WeightView.summary).getFirst()).containsEntry("latestWeightKg", 81.5);
+        assertThat(gateway.kilogramsOnOrBefore(date)).hasValue(81.5);
+        assertThat(gateway.kilogramsOnOrBefore(date.minusDays(1))).hasValue(81.25);
+    }
+
+    @Test
+    void bothCycleViewsReportNoDataWhenGarminReturnsNoContent() {
+        http.body = "null";
+        for (var view : CycleView.values()) {
+            var result = service.cycle("2025-04-01", null, view, false, false);
+            assertThat(result.status()).isEqualTo("no_data");
+            assertThat(Stub.JSON.valueToTree(result.data()).path("missingDates").get(0).asString())
+                    .isEqualTo("2025-04-01");
+        }
     }
 
     @Test

@@ -167,6 +167,25 @@ class WellnessServiceTest {
     }
 
     @Test
+    void fitnessAgeAcceptsBothPersonalApiShapesAndKeepsTheRequestedAsOfDate() {
+        String measure = """
+                {"fitnessAge":41.5,"lastUpdated":"2024-12-30T09:15:00Z","components":{"rhr":{"value":54}}}""";
+        for (String body : List.of(measure, "[" + measure + "]")) {
+            http.fixtures.put(H14, body);
+            var result = report(View.FITNESS_AGE, DAY, null, options(0));
+            assertThat(result.status()).isEqualTo("ok");
+            assertThat(data(result).at("/observations/0/date").asString()).isEqualTo(DAY);
+            assertThat(values(result).path("fitnessAge").asDouble()).isEqualTo(41.5);
+            assertThat(values(result).path("lastUpdated").asString()).isEqualTo("2024-12-30T09:15:00Z");
+            assertThat(values(result).at("/components/rhr/value").asInt()).isEqualTo(54);
+        }
+        for (String body : List.of("42", "[false]", "{\"calendarDate\":\"2025-01-02\",\"fitnessAge\":42}")) {
+            http.fixtures.put(H14, body);
+            assertThat(report(View.FITNESS_AGE, DAY, null, Options.BASIC).status()).isEqualTo("garmin_unavailable");
+        }
+    }
+
+    @Test
     void goalsNeverCountAsMeasurementsAndStayAvailable() {
         http.fixtures.put(H1, """
                 {"dailyStepGoal":8000,"intensityMinutesGoal":150,"hydrationGoalInML":2000}

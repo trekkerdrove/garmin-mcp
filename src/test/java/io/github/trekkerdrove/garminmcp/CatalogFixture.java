@@ -55,7 +55,8 @@ final class CatalogFixture {
         route(server, token, "/hrv-service/hrv/", "{}");
         route(server, token, "/hrv-service/hrv/daily/", "{\"hrvSummaries\":[]}");
         route(server, token, "/biometric-service/heartRateZones/v2", "[]");
-        route(server, token, "/fitnessage-service/fitnessage/v2/", "[]");
+        route(server, token, "/fitnessage-service/fitnessage/v2/", """
+                {"fitnessAge":47.5,"lastUpdated":"2025-03-31"}""");
         route(server, token, "/metrics-service/metrics/maxmet/daily/", "[]");
         route(server, token, "/weight-service/weight/all/", """
                 [{"calendarDate":"2025-04-01","weight":71.5},{"calendarDate":"2025-04-01","weight":72.0}]""");
@@ -96,6 +97,11 @@ final class CatalogFixture {
             if (allowed(ex, token)) {
                 ROUTES.add(path);
                 String uri = ex.getRequestURI().getPath();
+                if (path.startsWith("/periodichealth-service/") && uri.endsWith("/2000-01-02")) {
+                    ex.sendResponseHeaders(204, -1);
+                    ex.close();
+                    return;
+                }
                 int status = switch (uri.substring(uri.lastIndexOf('/') + 1)) {
                     case "401" -> 401;
                     case "403" -> 403;
