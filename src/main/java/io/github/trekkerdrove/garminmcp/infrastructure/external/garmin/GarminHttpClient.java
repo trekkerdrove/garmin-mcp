@@ -1,4 +1,4 @@
-package io.github.trekkerdrove.garminmcp;
+package io.github.trekkerdrove.garminmcp.infrastructure.external.garmin;
 
 import java.net.http.HttpClient;
 import java.text.ParseException;
@@ -6,7 +6,7 @@ import java.time.Duration;
 import java.time.Instant;
 
 import com.nimbusds.jwt.SignedJWT;
-import org.springframework.ai.mcp.annotation.McpTool;
+import io.github.trekkerdrove.garminmcp.application.port.out.GarminActivityProbe;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
@@ -19,7 +19,7 @@ import org.springframework.web.client.RestClientResponseException;
 import tools.jackson.databind.node.ArrayNode;
 
 @Component
-class GarminConnectionTool {
+public class GarminHttpClient implements GarminActivityProbe {
 
     private static final String TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token";
     private static final String ACTIVITIES_PATH = "/activitylist-service/activities/search/activities";
@@ -29,11 +29,11 @@ class GarminConnectionTool {
     private Token cachedToken;
 
     @Autowired
-    GarminConnectionTool(@Value("${garmin.api-key}") String apiKey) {
+    GarminHttpClient(@Value("${garmin.api-key}") String apiKey) {
         this(apiKey, "https://personal.connectapi.garmin.com");
     }
 
-    GarminConnectionTool(String apiKey, String baseUrl) {
+    public GarminHttpClient(String apiKey, String baseUrl) {
         this.apiKey = apiKey;
         var http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
         var factory = new JdkClientHttpRequestFactory(http);
@@ -41,16 +41,13 @@ class GarminConnectionTool {
         this.client = RestClient.builder().baseUrl(baseUrl).requestFactory(factory).build();
     }
 
-    @McpTool(name = "garmin_check_connection",
-            description = "Checks the owner's Garmin connection using at most one activity. Returns a status and "
-                    + "whether Garmin returned an activity. Does not return activity details.",
-            annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false))
-    public ConnectionResult checkConnection() {
+    @Override
+    public Outcome probeActivity() {
         if (apiKey.isBlank()) {
-            return new ConnectionResult("missing_garmin_key", null);
+            return Outcome.MISSING_KEY;
         }
         if (!apiKey.chars().allMatch(character -> character > 0x20 && character < 0x7f)) {
-            return new ConnectionResult("invalid_garmin_key", null);
+            return Outcome.INVALID_KEY;
         }
 
         Token token = null;
@@ -62,22 +59,22 @@ class GarminConnectionTool {
                     .accept(MediaType.ALL)
                     .retrieve()
                     .body(ArrayNode.class);
-            return activities == null
-                    ? new ConnectionResult("garmin_unavailable", null)
-                    : new ConnectionResult("connected", !activities.isEmpty());
+            if (activities == null) {
+                return Outcome.UNAVAILABLE;
+            }
+            return activities.isEmpty() ? Outcome.NO_ACTIVITY : Outcome.ACTIVITY_FOUND;
         } catch (RestClientResponseException error) {
             return switch (error.getStatusCode().value()) {
-                case 401, 403 -> {
-                    if (error.getStatusCode().value() == 401) {
-                        invalidate(token);
-                    }
-                    yield new ConnectionResult("garmin_access_denied", null);
+                case 401 -> {
+                    invalidate(token);
+                    yield Outcome.ACCESS_DENIED;
                 }
-                case 429 -> new ConnectionResult("garmin_rate_limited", null);
-                default -> new ConnectionResult("garmin_unavailable", null);
+                case 403 -> Outcome.ACCESS_DENIED;
+                case 429 -> Outcome.RATE_LIMITED;
+                default -> Outcome.UNAVAILABLE;
             };
         } catch (RestClientException | ParseException | IllegalArgumentException error) {
-            return new ConnectionResult("garmin_unavailable", null);
+            return Outcome.UNAVAILABLE;
         }
     }
 
@@ -112,6 +109,4 @@ class GarminConnectionTool {
     }
 
     private record Token(String value, Instant expiresAt) {}
-
-    record ConnectionResult(String status, Boolean hasActivity) {}
 }

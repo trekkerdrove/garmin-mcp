@@ -22,6 +22,9 @@ import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.github.trekkerdrove.garminmcp.application.dto.ConnectionResult;
+import io.github.trekkerdrove.garminmcp.application.service.CheckGarminConnectionService;
+import io.github.trekkerdrove.garminmcp.infrastructure.external.garmin.GarminHttpClient;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -68,8 +71,8 @@ class McpIntegrationTest {
     @Autowired
     RestTemplate oauthHttp;
 
-    @TestBean(methodName = "fakeGarminTool", enforceOverride = true)
-    GarminConnectionTool garminConnectionTool;
+    @TestBean(methodName = "fakeGarminClient", enforceOverride = true)
+    GarminHttpClient garminHttpClient;
 
     @DynamicPropertySource
     static void applicationProperties(DynamicPropertyRegistry registry) {
@@ -78,8 +81,8 @@ class McpIntegrationTest {
         registry.add("mcp.oauth.owner-subject", () -> OWNER);
     }
 
-    static GarminConnectionTool fakeGarminTool() {
-        return new GarminConnectionTool("fake-personal-key", "http://127.0.0.1:" + GARMIN.getAddress().getPort());
+    static GarminHttpClient fakeGarminClient() {
+        return new GarminHttpClient("fake-personal-key", "http://127.0.0.1:" + GARMIN.getAddress().getPort());
     }
 
     @AfterAll
@@ -89,8 +92,9 @@ class McpIntegrationTest {
 
     @Test
     void doesNotEchoAMalformedGarminKey() {
-        var tool = new GarminConnectionTool("fake-secret\ninvalid");
-        assertThat(tool.checkConnection().status()).isEqualTo("invalid_garmin_key");
+        var client = new GarminHttpClient("fake-secret\ninvalid", "http://127.0.0.1:" + GARMIN.getAddress().getPort());
+        var checkConnection = new CheckGarminConnectionService(client);
+        assertThat(checkConnection.checkConnection()).isEqualTo(new ConnectionResult("invalid_garmin_key", null));
     }
 
     @Test

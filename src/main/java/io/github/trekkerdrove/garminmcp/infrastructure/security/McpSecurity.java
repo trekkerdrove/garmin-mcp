@@ -1,9 +1,8 @@
-package io.github.trekkerdrove.garminmcp;
+package io.github.trekkerdrove.garminmcp.infrastructure.security;
 
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
@@ -11,6 +10,7 @@ import jakarta.servlet.http.HttpServletResponse;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.security.authorization.AuthorizationDecision;
@@ -29,11 +29,9 @@ import org.springframework.security.oauth2.server.resource.web.BearerTokenAuthen
 import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestTemplate;
 
-@RestController
+@Configuration(proxyBeanMethods = false)
 class McpSecurity {
 
     private static final String METADATA = "/.well-known/oauth-protected-resource";
@@ -97,11 +95,6 @@ class McpSecurity {
                     .addFilterBefore(originFilter(), BearerTokenAuthenticationFilter.class);
         }
         return http.build();
-    }
-
-    @GetMapping("/health")
-    Map<String, String> health() {
-        return Map.of("status", "UP");
     }
 
     private boolean configured() {
