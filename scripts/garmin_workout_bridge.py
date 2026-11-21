@@ -3,10 +3,13 @@
 import json
 import logging
 import os
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 import unicodedata
 
 from garminconnect import Garmin, GarminConnectConnectionError
@@ -14,6 +17,9 @@ from garminconnect import Garmin, GarminConnectConnectionError
 
 SPORTS = {"running": 1, "walking": 12, "cycling": 2}
 KINDS = {"warmup": 1, "cooldown": 2, "interval": 3, "recovery": 4}
+# Garmin computes BMI for a manual weight, even without any scale data.
+COMPOSITION_FIELDS = ("bodyFat", "bodyWater", "boneMass", "muscleMass", "physiqueRating",
+                      "visceralFat", "visceralFatMass", "visceralFatRating", "metabolicAge", "basalMet", "activeMet")
 
 
 def build_payload(draft):
@@ -296,11 +302,148 @@ def edit_existing(garmin, operation, request):
     return {"status": "workout_write_unconfirmed"}
 
 
+def weight_rows(garmin, day):
+    rows = garmin.get_daily_weigh_ins(day)["dateWeightList"]
+    if not isinstance(rows, list) or any(row["calendarDate"] != day for row in rows):
+        raise ValueError("Unexpected Garmin weight day")
+    return rows
+
+
+def weight_timestamp(row):
+    # Garmin sends both the real UTC epoch and the wall time encoded as a UTC epoch.
+    utc = datetime.fromtimestamp(row["timestampGMT"] / 1000, timezone.utc)
+    wall = datetime.fromtimestamp(row["date"] / 1000, timezone.utc)
+    return wall.replace(tzinfo=timezone(wall - utc))
+
+
+def weight_kg(row):
+    return Decimal(str(row["weight"])) / 1000
+
+
+def editable_weight(row):
+    return row.get("sourceType") == "MANUAL" and all(row.get(key) is None for key in COMPOSITION_FIELDS)
+
+
+def weight_selection(row):
+    return f"{row['samplePk']}:{row['date']}:{row['timestampGMT']}:{weight_kg(row):f}"
+
+
+def weight_summary(row):
+    return {"measurementId": str(row["samplePk"]), "weightKg": float(weight_kg(row)),
+            "timestamp": weight_timestamp(row).isoformat(), "source": row.get("sourceType"),
+            "canCorrect": editable_weight(row), "selection": weight_selection(row)}
+
+
+def weight_result(status, data, **details):
+    return {"status": status, "data": {**data, **details}}
+
+
+def verified_weights(garmin, day, find):
+    for delay in (0, 0.25, 0.75):
+        if delay:
+            time.sleep(delay)
+        try:
+            rows = weight_rows(garmin, day)
+            matches = find(rows)
+        except Exception:
+            continue
+        if matches is not None:
+            return matches
+    return None
+
+
+def set_weight(garmin, request):
+    day, kg = request["date"], Decimal(str(request["weightKg"]))
+    data = {"date": day, "weightKg": float(kg)}
+    rows = weight_rows(garmin, day)
+    selection = request.get("selection")
+    original = None
+    original_id = None
+    if selection is not None:
+        original_id, local_ms, utc_ms, _ = selection.split(":")
+        timestamp = weight_timestamp({"date": int(local_ms), "timestampGMT": int(utc_ms)})
+        if timestamp.date().isoformat() != day:
+            return {"status": "invalid_input"}
+        original = next((row for row in rows if str(row["samplePk"]) == original_id), None)
+        if original is not None and weight_selection(original) != selection:
+            return weight_result("weight_measurement_changed", data, measurement=weight_summary(original))
+    elif len(rows) == 1 and not request["confirm"]:
+        original = rows[0]
+        timestamp = weight_timestamp(original)
+    else:
+        timestamp = datetime.fromisoformat(request["timestamp"])
+
+    data["timestamp"] = timestamp.isoformat()
+
+    def replacements(entries):
+        return [row for row in entries if editable_weight(row) and weight_kg(row) == kg
+                and weight_timestamp(row).isoformat() == data["timestamp"]]
+
+    matching = replacements(rows)
+    if selection is not None and original is None:
+        if len(matching) == 1:
+            return weight_result("already_exists", data, measurement=weight_summary(matching[0]))
+        return weight_result("weight_measurement_not_found", data)
+    if selection is None and rows and original is None:
+        if len(rows) == 1 and matching:
+            return weight_result("already_exists", data, measurement=weight_summary(matching[0]))
+        return weight_result("selection_required", data, measurements=[weight_summary(row) for row in rows])
+
+    if original is not None:
+        data["previousMeasurement"] = weight_summary(original)
+        if weight_kg(original) == kg:
+            return weight_result("already_exists", data, measurement=data["previousMeasurement"])
+        if not editable_weight(original) or timestamp.date().isoformat() != day:
+            return weight_result("weight_not_editable", data)
+    if not request["confirm"]:
+        return weight_result("preview", data, action="create" if original is None else "correct")
+
+    if not matching:
+        try:
+            garmin.add_weigh_in(float(kg), "kg", data["timestamp"])
+        except Exception as error:
+            rejection = failure(error, "weight_write_unconfirmed")
+            if rejection["status"] != "weight_write_unconfirmed":
+                return rejection
+        rows = verified_weights(garmin, day, lambda entries: entries if replacements(entries) else None)
+        if rows is None:
+            return {"status": "weight_write_unconfirmed"}
+        matching = replacements(rows)
+    if len(matching) != 1:
+        return {"status": "weight_write_unconfirmed"}
+
+    saved = matching[0]
+    saved_id = str(saved["samplePk"])
+    data["measurement"] = weight_summary(saved)
+    if original is None:
+        return weight_result("created", data)
+    current = next((row for row in rows if str(row["samplePk"]) == original_id), None)
+    if current is None or original_id == saved_id:
+        return weight_result("updated", data)
+    if weight_selection(current) != selection or not editable_weight(current):
+        return weight_result("weight_measurement_changed", data)
+    try:
+        garmin.delete_weigh_in(original_id, day)
+    except Exception:
+        pass
+
+    def replacement_only(entries):
+        ids = {str(row["samplePk"]) for row in entries}
+        remaining = replacements(entries)
+        return True if original_id not in ids and len(remaining) == 1 and str(remaining[0]["samplePk"]) == saved_id else None
+
+    if verified_weights(garmin, day, replacement_only):
+        return weight_result("updated", data)
+    return weight_result("weight_cleanup_pending", data)
+
+
 def publish(garmin, request):
     recent = garmin.get_activities(0, 20)
     if not any(row["activityId"] == request["expectedActivityId"] for row in recent):
         return {"status": "workout_account_unverified"}
     operation = request["operation"]
+    if operation == "set_weight":
+        return set_weight(garmin, request)
     if operation == "create":
         return create(garmin, request["workout"])
     if operation == "search":

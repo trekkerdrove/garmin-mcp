@@ -1,5 +1,11 @@
 package io.github.trekkerdrove.garminmcp.application.service;
 
+import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.List;
@@ -10,17 +16,20 @@ import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
 import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader;
 import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader.SearchView;
-import io.github.trekkerdrove.garminmcp.application.port.out.WorkoutPublisher;
-import io.github.trekkerdrove.garminmcp.application.port.out.WorkoutPublisher.Operation;
+import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort;
+import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort.Operation;
 
-public final class WorkoutService {
+public final class GarminConnectService {
+    private static final ZoneId PARIS = ZoneId.of("Europe/Paris");
     private final ActivityReader activities;
-    private final WorkoutPublisher publisher;
+    private final GarminConnectPort publisher;
+    private final Clock clock;
     private final Semaphore slot = new Semaphore(1);
 
-    public WorkoutService(ActivityReader activities, WorkoutPublisher publisher) {
+    public GarminConnectService(ActivityReader activities, GarminConnectPort publisher, Clock clock) {
         this.activities = activities;
         this.publisher = publisher;
+        this.clock = clock;
     }
 
     public ToolResult create(WorkoutDraft draft, boolean confirm) {
@@ -66,6 +75,35 @@ public final class WorkoutService {
             args.put("distanceChanges", List.copyOf(changes));
         }
         return run(Operation.duplicate, args);
+    }
+
+    public ToolResult setWeight(String date, String time, BigDecimal weightKg, String selection, boolean confirm) {
+        var now = OffsetDateTime.now(clock.withZone(PARIS));
+        var day = date == null ? now.toLocalDate() : LocalDate.parse(date);
+        if (day.getYear() < 1900 || day.isAfter(now.toLocalDate()) || weightKg == null
+                || weightKg.signum() <= 0 || weightKg.compareTo(BigDecimal.valueOf(1_000)) >= 0
+                || weightKg.stripTrailingZeros().scale() > 3
+                || (selection != null && (!selection.matches("[0-9]{1,20}:-?[0-9]{1,15}:-?[0-9]{1,15}:[0-9]{1,6}(?:\\.[0-9]{1,9})?")
+                        || time != null))) {
+            throw new IllegalArgumentException("Invalid weigh-in");
+        }
+        if (time != null && !time.matches("[0-9]{2}:[0-9]{2}")) {
+            throw new IllegalArgumentException("Expected HH:mm");
+        }
+        var local = day.atTime(time == null ? LocalTime.MIDNIGHT : LocalTime.parse(time));
+        var offsets = PARIS.getRules().getValidOffsets(local);
+        if (offsets.size() != 1 || local.atOffset(offsets.getFirst()).isAfter(now)) {
+            throw new IllegalArgumentException("Invalid local time");
+        }
+        var args = new HashMap<String, Object>();
+        args.put("date", day.toString());
+        args.put("timestamp", local.atOffset(offsets.getFirst()).toString());
+        args.put("weightKg", weightKg);
+        args.put("confirm", confirm);
+        if (selection != null) {
+            args.put("selection", selection);
+        }
+        return run(Operation.set_weight, args);
     }
 
     private static Map<String, Object> target(long workoutId, boolean confirm) {

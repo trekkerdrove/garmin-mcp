@@ -1,6 +1,10 @@
 package io.github.trekkerdrove.garminmcp.application.service;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import io.github.trekkerdrove.garminmcp.application.dto.GarminFailure;
@@ -11,8 +15,8 @@ import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft.Sport;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft.Step;
 import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader;
 import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader.SearchView;
-import io.github.trekkerdrove.garminmcp.application.port.out.WorkoutPublisher;
-import io.github.trekkerdrove.garminmcp.application.port.out.WorkoutPublisher.Operation;
+import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort;
+import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort.Operation;
 import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import org.junit.jupiter.api.Test;
 
@@ -22,12 +26,31 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-class WorkoutServiceTest {
+class GarminConnectServiceTest {
     private final ActivityReader activities = mock(ActivityReader.class);
-    private final WorkoutPublisher publisher = mock(WorkoutPublisher.class);
-    private final WorkoutService service = new WorkoutService(activities, publisher);
+    private final GarminConnectPort publisher = mock(GarminConnectPort.class);
+    private final GarminConnectService service = new GarminConnectService(activities, publisher,
+            Clock.fixed(Instant.parse("2026-03-29T22:30:00Z"), ZoneOffset.UTC));
     private final WorkoutDraft draft = new WorkoutDraft("Test", Sport.running, List.of(
             new Step(Kind.warmup, 120, null, null, null), new Step(Kind.interval, null, 400, 3, null)));
+
+    @Test
+    void weightUsesParisCivilDayAndRejectsFutureOrNonexistentTimes() {
+        var kg = new BigDecimal("72.4");
+        var activity = new ActivityReader.Activity(42, null, LocalDate.of(2026, 3, 29), "running",
+                Map.of(), Map.of(), Map.of(), new ActivityReader.Selection(List.of(), false), Map.of(), Map.of());
+        when(activities.search(Map.of(), 0, 1, SearchView.SUMMARY)).thenReturn(List.of(activity));
+        var result = new ToolResult("preview", null);
+        when(publisher.publish(Operation.set_weight, Map.of("date", "2026-03-30",
+                "timestamp", "2026-03-30T00:00+02:00", "weightKg", kg, "confirm", false), 42)).thenReturn(result);
+        assertThat(service.setWeight(null, null, kg, null, false)).isEqualTo(result);
+        assertThatThrownBy(() -> service.setWeight("2026-03-30", "08:00", kg, null, false))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.setWeight("2026-03-29", "02:30", kg, null, false))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.setWeight(null, null, new BigDecimal("72.4005"), null, false))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 
     @Test
     void previewsWithoutReadingEitherGarminApi() {

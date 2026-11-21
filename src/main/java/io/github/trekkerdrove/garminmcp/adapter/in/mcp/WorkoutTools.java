@@ -3,7 +3,7 @@ package io.github.trekkerdrove.garminmcp.adapter.in.mcp;
 import java.util.List;
 import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
-import io.github.trekkerdrove.garminmcp.application.service.WorkoutService;
+import io.github.trekkerdrove.garminmcp.application.service.GarminConnectService;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -15,9 +15,9 @@ class WorkoutTools {
     private static final String STEP_TARGETS = "Optional target: heartRateZone (1–5) or, for running/walking, "
             + "paceSecondsPerKm with fast and slow bounds in whole seconds per km. "
             + "4:25–4:35/km is {fast:265,slow:275}. For a single pace use equal bounds.";
-    private final WorkoutService workouts;
+    private final GarminConnectService workouts;
 
-    WorkoutTools(WorkoutService workouts) {
+    WorkoutTools(GarminConnectService workouts) {
         this.workouts = workouts;
     }
 

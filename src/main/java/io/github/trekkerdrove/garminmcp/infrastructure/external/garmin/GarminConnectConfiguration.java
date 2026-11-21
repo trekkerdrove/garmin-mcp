@@ -4,9 +4,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Clock;
 import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader;
-import io.github.trekkerdrove.garminmcp.application.port.out.WorkoutPublisher;
-import io.github.trekkerdrove.garminmcp.application.service.WorkoutService;
+import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort;
+import io.github.trekkerdrove.garminmcp.application.service.GarminConnectService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -14,9 +15,9 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
-class WorkoutConfiguration {
+class GarminConnectConfiguration {
     @Bean
-    WorkoutPublisher workoutPublisher(
+    GarminConnectPort workoutPublisher(
             @Value("${garmin.workouts.python}") String python,
             @Value("${garmin.workouts.script}") String script,
             @Value("${garmin.workouts.token-directory}") String tokenDirectory,
@@ -25,12 +26,12 @@ class WorkoutConfiguration {
             throw new IllegalArgumentException("Set exactly one Garmin Connect session source.");
         }
         Path directory = sessionFile.isBlank() ? Path.of(tokenDirectory) : privateCopy(Path.of(sessionFile));
-        return new PythonWorkoutPublisher(Path.of(python), Path.of(script), directory);
+        return new PythonGarminConnect(Path.of(python), Path.of(script), directory);
     }
 
     @Bean
-    WorkoutService workouts(ActivityReader activities, WorkoutPublisher publisher) {
-        return new WorkoutService(activities, publisher);
+    GarminConnectService workouts(ActivityReader activities, GarminConnectPort publisher) {
+        return new GarminConnectService(activities, publisher, Clock.systemUTC());
     }
 
     private static Path privateCopy(Path sessionFile) throws IOException {

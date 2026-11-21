@@ -63,6 +63,14 @@ les quatre variables dans **Environment**. Pour WorkOS AuthKit, active CIMD et d
 `MCP_PUBLIC_URL` comme *Resource Indicator*. Dans ChatGPT web, enregistre cette URL comme
 serveur MCP personnalisé et sélectionne **OAuth**.
 
+## Saisir ou corriger une pesée
+
+`garmin_set_weight` prend un poids en kg et une date `YYYY-MM-DD`. La date par défaut est aujourd’hui dans `Europe/Paris`. Pour une nouvelle pesée, l’heure par défaut est minuit. Fournis `time` au format `HH:mm` si l’heure de la mesure est connue.
+
+Appelle d’abord l’outil sans `confirm` pour voir l’aperçu. Si plusieurs pesées existent à cette date, `selection_required` renvoie les heures, les valeurs et les identifiants. Choisis la pesée, recopie sa valeur `selection` et confirme l’opération avec `confirm: true`. Une correction conserve l’heure de la pesée manuelle et vérifie la nouvelle valeur avant de retirer l’ancienne. L’outil protège les mesures de balance et les entrées de composition corporelle. `weight_cleanup_pending` indique que le remplacement a été relu et que la suppression de l’ancienne mesure reste à vérifier. Répète le même appel avec la même valeur `selection` pour terminer la correction. Si l’écriture reste incertaine (`weight_write_unconfirmed`) ou si l’ancienne mesure a changé, relis la journée avant toute nouvelle confirmation.
+
+L’outil requiert la session Garmin Connect déjà utilisée pour gérer les entraînements. `garmin_get_weight` lit les mesures par la Personal API.
+
 ## Gérer les entraînements
 
 `garmin_create_workout` enregistre une séance dans la bibliothèque Garmin Connect. Il accepte la course, la marche et le vélo, avec 1 à 50 étapes de durée ou de distance. Chaque étape peut avoir une cible de fréquence cardiaque ou, en course et en marche, une cible d’allure. Les bornes `fast` et `slow` s’expriment en secondes par kilomètre. Pour une allure unique de 4 min 30 s/km, donne 270 aux deux bornes. Le premier appel prévisualise les étapes. Passe `confirm: true` après validation pour enregistrer la séance et la relire. Une séance identique portant le même nom est réutilisée. Pour une séance différente, choisis un autre nom.
@@ -90,6 +98,6 @@ Pour dupliquer une séance, appelle `garmin_duplicate_workout` avec `{"workoutId
 
 Après vérification de l’aperçu, ajoute `"confirm":true` aux mêmes arguments. La modification conserve l’ID. Le serveur relit la séance après écriture et vérifie sa disparition après suppression. Un ID absent renvoie `workout_not_found`. Si la vérification échoue après l’envoi de l’écriture, le statut `workout_write_unconfirmed` signale que l’état final reste à vérifier.
 
-Les six outils de bibliothèque portent le catalogue à 42 outils quand `GARMIN_WORKOUT_WRITES_ENABLED=true`. Génère une session en Terminal avec `uv run --script scripts/prototype_garmin_workout.py login --token-dir ~/.garmin-connect-workouts` sur ton poste. En local, installe `garminconnect==0.3.2` dans un environnement Python et indique son exécutable avec `GARMIN_WORKOUT_PYTHON`. Renseigne `GARMIN_CONNECT_TOKEN_DIR` avec le dossier privé de la session. Le serveur compare une activité récente à la Personal API avant tout accès à la bibliothèque pour vérifier que les deux accès visent le même compte.
+Les six outils de bibliothèque et la saisie du poids portent le catalogue à 43 outils quand `GARMIN_WORKOUT_WRITES_ENABLED=true`. Génère une session en Terminal avec `uv run --script scripts/prototype_garmin_workout.py login --token-dir ~/.garmin-connect-workouts` sur ton poste. En local, installe `garminconnect==0.3.2` dans un environnement Python et indique son exécutable avec `GARMIN_WORKOUT_PYTHON`. Renseigne `GARMIN_CONNECT_TOKEN_DIR` avec le dossier privé de la session. Le serveur compare une activité récente à la Personal API avant tout accès à la bibliothèque pour vérifier que les deux accès visent le même compte.
 
 L’image Docker embarque le client Python. Sur Render, ajoute le fichier de la session dédiée aux **Secret Files**, puis règle `GARMIN_CONNECT_SESSION_FILE=/etc/secrets/garmin_tokens.json` et active l’écriture. Le serveur garde une copie privée pour renouveler la session pendant son exécution. Le système de fichiers de Render Free est éphémère. Remplace le fichier secret si Garmin refuse la session après un redémarrage. L’adaptateur utilise l’API interne Garmin Connect, dont les réponses et le mécanisme de connexion peuvent évoluer.
