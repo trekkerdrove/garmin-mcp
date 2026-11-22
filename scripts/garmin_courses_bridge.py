@@ -337,12 +337,16 @@ def mutate(garmin, command, args):
             return result("course_write_unconfirmed")
 
 
+def account_verified(garmin, expected_id):
+    recent = request(garmin, "GET", garmin.garmin_connect_activities, params={"start": 0, "limit": 20})
+    return isinstance(recent, list) and any(isinstance(row, dict) and row.get("activityId") == expected_id
+                                            for row in recent)
+
+
 def publish(garmin, args):
     command = args["operation"].removeprefix("course_")
     try:
-        recent = request(garmin, "GET", garmin.garmin_connect_activities, params={"start": 0, "limit": 20})
-        if not isinstance(recent, list) or not any(isinstance(row, dict) and row.get("activityId") == args["expectedActivityId"]
-                                                  for row in recent):
+        if not account_verified(garmin, args["expectedActivityId"]):
             return result("course_account_unverified")
         if command == "list":
             items, complete = owner_library(garmin)

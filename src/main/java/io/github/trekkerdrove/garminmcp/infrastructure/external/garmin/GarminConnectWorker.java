@@ -38,7 +38,9 @@ final class GarminConnectWorker {
         }
         var arguments = new ArrayList<>(List.of(python.toString(), "-I", script.toString(), tokenDirectory.toString()));
         if (courses) arguments.add("courses");
-        int maxResponse = !courses ? 65_537
+        boolean courseResponse = courses && !"send_to_device".equals(args.get("operation"))
+                && !"list_devices".equals(args.get("operation"));
+        int maxResponse = !courseResponse ? 65_537
                 : "course_export".equals(args.get("operation")) ? EXPORT_WIRE_LIMIT + 1 : MAX_HTTP_BYTES + 1;
         int maxRequest = courses ? MAX_HTTP_BYTES : 16_384;
         var command = new ProcessBuilder(arguments).redirectError(ProcessBuilder.Redirect.DISCARD);
@@ -70,7 +72,7 @@ final class GarminConnectWorker {
             delivery.get(remaining(deadline), TimeUnit.NANOSECONDS);
             var bytes = response.get(remaining(deadline), TimeUnit.NANOSECONDS);
             if (bytes.length == 0 || bytes.length > maxResponse) {
-                throw new GarminFailure(courses && bytes.length > maxResponse ? "course_response_too_large" : failure);
+                throw new GarminFailure(courseResponse && bytes.length > maxResponse ? "course_response_too_large" : failure);
             }
             return json.readTree(bytes);
         } catch (IOException | JacksonException | ExecutionException | TimeoutException error) {

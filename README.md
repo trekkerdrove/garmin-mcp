@@ -100,7 +100,7 @@ Après vérification de l’aperçu, ajoute `"confirm":true` aux mêmes argument
 
 Pour la musculation, `garmin_search_strength_exercises` renvoie les références du catalogue Garmin et fonctionne sans session Garmin Connect. `garmin_create_strength_workout` accepte des blocs ordonnés avec exercice, séries, répétitions ou durée, charge en kg et deux repos indépendants. Par exemple, deux séries de huit squats à 62,5 kg avec 90 s entre les séries, puis 120 s avant le gainage. Le premier appel montre chaque série et chaque repos. Après confirmation, l’outil relit la séance dans Garmin Connect. Un rejeu identique renvoie le même ID. [Contrat de musculation](_bmad-output/specs/spec-garmin-strength-workouts/contrat-musculation.md)
 
-Avec les outils de bibliothèque, la création de séances de musculation, la saisie du poids et la lecture Garmin Coach, le catalogue compte 46 outils quand `GARMIN_WORKOUT_WRITES_ENABLED=true`. Génère une session en Terminal avec `uv run --script scripts/prototype_garmin_workout.py login --token-dir ~/.garmin-connect-workouts` sur ton poste. En local, installe `garminconnect==0.3.2` dans un environnement Python et indique son exécutable avec `GARMIN_WORKOUT_PYTHON`. Renseigne `GARMIN_CONNECT_TOKEN_DIR` avec le dossier privé de la session. Le serveur compare une activité récente à la Personal API avant d’accéder aux données Garmin Connect pour vérifier que les deux accès visent le même compte.
+Avec les outils de bibliothèque, la création de séances de musculation, la saisie du poids, la lecture Garmin Coach et l’envoi à un appareil, le catalogue compte 48 outils quand `GARMIN_WORKOUT_WRITES_ENABLED=true`, hors outils de parcours. Génère une session en Terminal avec `uv run --script scripts/prototype_garmin_workout.py login --token-dir ~/.garmin-connect-workouts` sur ton poste. En local, installe `garminconnect==0.3.2` dans un environnement Python et indique son exécutable avec `GARMIN_WORKOUT_PYTHON`. Renseigne `GARMIN_CONNECT_TOKEN_DIR` avec le dossier privé de la session. Le serveur compare une activité récente à la Personal API avant d’accéder aux données Garmin Connect pour vérifier que les deux accès visent le même compte.
 
 L’image Docker embarque le client Python. Sur Render, ajoute le fichier de la session dédiée aux **Secret Files**, puis règle `GARMIN_CONNECT_SESSION_FILE=/etc/secrets/garmin_tokens.json` et active l’écriture. Le serveur garde une copie privée pour renouveler la session pendant son exécution. Le système de fichiers de Render Free est éphémère. Remplace le fichier secret si Garmin refuse la session après un redémarrage. L’adaptateur utilise l’API interne Garmin Connect, dont les réponses et le mécanisme de connexion peuvent évoluer.
 
@@ -113,6 +113,14 @@ Le premier appel d’écriture renvoie l’aperçu et un `operationId` valide 15
 Renseigne `GARMIN_COURSE_VERIFIED_EDIT_FIELDS` avec les champs vérifiés lors de la recette. Le renommage est la valeur initiale `name`. Les autres champs sont `description`, `sport`, `source` et `coursePoints`. Renseigne `GARMIN_COURSE_VERIFIED_POINT_TYPES` avec les types vérifiés, par exemple `water,danger`. L’export natif utilise `gpx` par défaut. Ajoute `fit` à `GARMIN_COURSE_VERIFIED_NATIVE_EXPORTS` après validation. La reconstruction TCX exige des timestamps de trace disponibles.
 
 `GARMIN_COURSE_ORS_URL` et `GARMIN_COURSE_ORS_KEY` configurent le routage indépendamment de Garmin. `GARMIN_COURSE_ORS_PROFILES` accepte des correspondances telles que `trail_running=foot-hiking`. Le géocodage textuel exige `GARMIN_COURSE_PELIAS_URL` et, selon l’instance, `GARMIN_COURSE_PELIAS_KEY`.
+
+## Envoyer une séance ou un parcours vers un appareil Garmin
+
+Appelle `garmin_list_devices` et choisis l’appareil par son nom. Appelle `garmin_send_to_device` avec le `deviceId` en chaîne, puis le `workoutId` d’une séance ou le `courseId` d’un parcours déjà enregistré. Après une duplication, prends l’identifiant de la copie. Après une modification, l’identifiant reste le même.
+
+Vérifie les deux noms affichés à l’aperçu, puis répète les mêmes arguments avec `"confirm":true`. La confirmation de la sauvegarde et celle de l’envoi sont deux actions distinctes. `queued` signifie que Garmin Connect a accepté la mise en file. Synchronise l’appareil compatible pour y retrouver le contenu. Si le serveur renvoie `device_send_unconfirmed`, synchronise et vérifie l’appareil avant de confirmer un nouvel envoi.
+
+L’envoi de séances requiert `GARMIN_WORKOUT_WRITES_ENABLED=true`. Pour les parcours, active `GARMIN_COURSES_ENABLED` et `GARMIN_COURSE_WRITES_ENABLED`. Les deux outils communs apparaissent dès qu’un de ces types d’envoi est activé.
 
 ## Consulter les prochaines séances Garmin Coach
 

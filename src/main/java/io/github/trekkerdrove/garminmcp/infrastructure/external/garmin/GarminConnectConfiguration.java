@@ -8,6 +8,7 @@ import java.time.Clock;
 import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader;
 import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort;
 import io.github.trekkerdrove.garminmcp.application.port.out.StrengthExerciseCatalog;
+import io.github.trekkerdrove.garminmcp.application.service.DeviceSendService;
 import io.github.trekkerdrove.garminmcp.application.service.GarminConnectService;
 import io.github.trekkerdrove.garminmcp.application.service.StrengthWorkouts;
 import org.springframework.beans.factory.annotation.Value;
@@ -47,6 +48,15 @@ class GarminConnectConfiguration {
     @ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
     GarminConnectService workouts(ActivityReader activities, GarminConnectPort publisher) {
         return new GarminConnectService(activities, publisher, Clock.systemUTC());
+    }
+
+    @Bean
+    @ConditionalOnExpression("${garmin.workouts.enabled:false} || (${garmin.courses.enabled:false} && ${garmin.courses.writes-enabled:false})")
+    DeviceSendService deviceSendService(ActivityReader activities, GarminConnectWorker worker,
+            @Value("${garmin.workouts.enabled:false}") boolean workoutWrites,
+            @Value("${garmin.courses.enabled:false}") boolean courses,
+            @Value("${garmin.courses.writes-enabled:false}") boolean courseWrites) {
+        return new DeviceSendService(activities, new PythonGarminDevices(worker), workoutWrites, courses && courseWrites);
     }
 
     private static Path privateCopy(Path sessionFile) throws IOException {

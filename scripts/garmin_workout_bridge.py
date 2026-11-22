@@ -17,11 +17,13 @@ import time
 import unicodedata
 
 from garminconnect import Garmin, GarminConnectConnectionError
+from requests.exceptions import ConnectTimeout
 
 
 SPORTS = {"running": 1, "walking": 12, "cycling": 2}
 KINDS = {"warmup": 1, "cooldown": 2, "interval": 3, "recovery": 4}
 MAX_RESPONSE_BYTES = 65_536
+DEVICE_OPERATIONS = {"list_devices", "send_to_device"}
 # Garmin computes BMI for a manual weight, even without any scale data.
 COMPOSITION_FIELDS = ("bodyFat", "bodyWater", "boneMass", "muscleMass", "physiqueRating",
                       "visceralFat", "visceralFatMass", "visceralFatRating", "metabolicAge", "basalMet", "activeMet")
@@ -712,9 +714,142 @@ def set_weight(garmin, request):
     return weight_result("weight_cleanup_pending", data)
 
 
-def publish(garmin, request):
+def account_verified(garmin, expected_id):
     recent = garmin.get_activities(0, 20)
-    if not any(row["activityId"] == request["expectedActivityId"] for row in recent):
+    return isinstance(recent, list) and any(isinstance(row, dict) and row.get("activityId") == expected_id
+                                            for row in recent)
+
+
+def device_number(value):
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{1,19}", value):
+        value = int(value)
+    if type(value) is int and 0 < value <= 2**63 - 1:
+        return value
+    raise ValueError("Invalid Garmin device ID")
+
+
+def valid_send_name(value):
+    if not isinstance(value, str) or len(value) > 512 or not value.strip():
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def device_list(garmin):
+    rows = garmin.get_devices()
+    if not isinstance(rows, list):
+        raise ValueError("Invalid Garmin device list")
+    devices = {}
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        device_id = row.get("deviceId")
+        try:
+            number = device_number(device_id)
+        except ValueError:
+            continue
+        if number in seen:
+            devices.pop(number, None)
+            continue
+        seen.add(number)
+        name = next((name for name in (row.get("displayName"), row.get("productDisplayName"))
+                     if valid_send_name(name)), None)
+        if name is not None:
+            devices[number] = {"deviceId": str(device_id), "name": name}
+    return devices
+
+
+def queue_device_message(garmin, message, unavailable):
+    try:
+        client = garmin.client
+        if client._token_expires_soon():
+            client._refresh_session()
+        headers = client.get_api_headers()
+        session = client._fresh_api_session()
+    except Exception as error:
+        return device_read_failure(error, unavailable)
+    # The library request helper replays a 401. The queue only gets one POST.
+    try:
+        with session as transport, transport.request("POST", f"{client._connectapi}/device-service/devicemessage/messages",
+                                                      json=[message], headers=headers, timeout=(4, 10), stream=True,
+                                                      allow_redirects=False) as response:
+            status = response.status_code
+            if status in {200, 204}:
+                return {"status": "queued"}
+            if status == 429:
+                return {"status": "garmin_rate_limited"}
+            if 400 <= status < 500 and status != 408:
+                return {"status": "device_send_rejected"}
+    except ConnectTimeout:
+        return {"status": unavailable}
+    except Exception:
+        pass
+    return {"status": "device_send_unconfirmed"}
+
+
+def device_read_failure(error, unavailable):
+    status = {401: "course_account_unverified" if unavailable == "garmin_unavailable" else "workout_session_unavailable",
+              403: "garmin_access_denied", 429: "garmin_rate_limited"}.get(http_status(error), unavailable)
+    return {"status": status}
+
+
+def device_operation(garmin, request, course_bridge=None):
+    courses = course_bridge is not None
+    kind = "course" if courses else "workout"
+    unavailable = "garmin_unavailable" if courses else "workout_service_unavailable"
+    list_only = request["operation"] == "list_devices"
+    id_key = f"{kind}Id"
+    if not list_only:
+        content_id = request.get(id_key)
+        device_id = request.get("deviceId")
+        confirm = request.get("confirm", False)
+        if (type(content_id) is not int or not 0 < content_id <= 2**63 - 1 or not isinstance(device_id, str)
+                or type(confirm) is not bool or ("workoutId" in request and "courseId" in request)):
+            return {"status": "invalid_input"}
+        try:
+            number = device_number(device_id)
+        except ValueError:
+            return {"status": "invalid_input"}
+    try:
+        verify_account = course_bridge["account_verified"] if courses else account_verified
+        if not verify_account(garmin, request["expectedActivityId"]):
+            return {"status": f"{kind}_account_unverified"}
+        if list_only:
+            devices = list(device_list(garmin).values())
+            return {"status": "ok" if devices else "no_data", "data": {"devices": devices}}
+        read_content = course_bridge["owned_detail"] if courses else library_workout
+        content = read_content(garmin, content_id)
+        if content is None:
+            return {"status": f"{kind}_not_found"}
+        name = content[f"{kind}Name"]
+        if not valid_send_name(name):
+            raise ValueError("Invalid Garmin content name")
+        device = device_list(garmin).get(number)
+        if device is None:
+            return {"status": "device_not_found"}
+    except LibraryLimit:
+        return {"status": "workout_library_limit"}
+    except Exception as error:
+        if courses and isinstance(error, course_bridge["CourseError"]):
+            return {"status": error.status}
+        return device_read_failure(error, unavailable)
+    data = {id_key: content_id, "name": name, "deviceId": device_id, "deviceName": device["name"]}
+    if not confirm:
+        return {"status": "preview", "data": data}
+    message_url = (f"course-service/course/fit/{content_id}/{number}?elevation=true" if courses
+                   else f"workout-service/workout/FIT/{content_id}")
+    reply = queue_device_message(garmin, {"deviceId": number, "messageName": name, "groupName": None,
+                                         "fileType": "FIT", "metaDataId": content_id, "messageType": f"{kind}s",
+                                         "priority": 0 if courses else 1, "messageUrl": message_url}, unavailable)
+    return {**reply, "data": data} if reply["status"] == "queued" else reply
+
+
+def publish(garmin, request):
+    if not account_verified(garmin, request["expectedActivityId"]):
         return {"status": "workout_account_unverified"}
     operation = request["operation"]
     if operation == "set_weight":
@@ -767,7 +902,11 @@ def main(token_dir, courses=False):
     request = json.loads(raw)
     token_file = Path(token_dir) / "garmin_tokens.json"
     with session_lock(token_file) as lock:
-        return locked_publish(lock, token_file, request, courses)
+        result = locked_publish(lock, token_file, request, courses)
+    if courses and request["operation"] in DEVICE_OPERATIONS:
+        if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > MAX_RESPONSE_BYTES:
+            return {"status": "course_response_too_large"}
+    return result
 
 
 def locked_publish(lock, token_file, request, courses):
@@ -790,10 +929,15 @@ def locked_publish(lock, token_file, request, courses):
     except Exception:
         return {"status": unavailable}
     before = garmin.client.dumps()
+    device = request["operation"] in DEVICE_OPERATIONS
     try:
         if courses:
             module = runpy.run_path(str(Path(__file__).with_name("garmin_courses_bridge.py")))
+            if device:
+                return device_operation(garmin, request, module)
             return module["publish"](garmin, request)
+        if device:
+            return device_operation(garmin, request)
         return publish(garmin, request)
     finally:
         try:
@@ -801,7 +945,7 @@ def locked_publish(lock, token_file, request, courses):
             if refreshed != before:
                 save_session(token_file, refreshed)
         except (OSError, TypeError, ValueError):
-            if not courses:
+            if not courses and not device:
                 raise
 
 

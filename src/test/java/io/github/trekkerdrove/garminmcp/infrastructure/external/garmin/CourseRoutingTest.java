@@ -6,8 +6,10 @@ import io.github.trekkerdrove.garminmcp.application.port.out.CourseLibrary;
 import io.github.trekkerdrove.garminmcp.application.port.out.CourseRouter;
 import io.github.trekkerdrove.garminmcp.application.port.out.GarminArchive;
 import io.github.trekkerdrove.garminmcp.application.port.out.StrengthExerciseCatalog;
+import io.github.trekkerdrove.garminmcp.application.service.DeviceSendService;
 import io.github.trekkerdrove.garminmcp.application.service.GarminConnectService;
 import io.github.trekkerdrove.garminmcp.application.service.StrengthWorkouts;
+import io.modelcontextprotocol.server.McpStatelessServerFeatures.SyncToolSpecification;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -19,6 +21,7 @@ import org.springframework.test.json.JsonCompareMode;
 import org.springframework.web.client.RestClient;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.InstanceOfAssertFactories.list;
 import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.*;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.*;
@@ -91,8 +94,9 @@ class CourseRoutingTest {
     void createsOneSharedSessionWorkerAndKeepsReadOnlyToolsSeparate() throws ClassNotFoundException {
         var reads = Class.forName("io.github.trekkerdrove.garminmcp.adapter.in.mcp.CourseTools");
         var writes = Class.forName("io.github.trekkerdrove.garminmcp.adapter.in.mcp.CourseWriteTools");
+        var devices = Class.forName("io.github.trekkerdrove.garminmcp.adapter.in.mcp.DeviceTools");
         var config = new ApplicationContextRunner().withUserConfiguration(GarminConnectConfiguration.class,
-                CourseConfiguration.class, CourseFormats.class, reads, writes)
+                CourseConfiguration.class, CourseFormats.class, reads, writes, devices)
                 .withBean(ActivityReader.class, () -> mock(ActivityReader.class))
                 .withBean(StrengthExerciseCatalog.class, () -> mock(StrengthExerciseCatalog.class))
                 .withBean(GarminArchive.class, () -> (id, max) -> new byte[0]);
@@ -101,9 +105,18 @@ class CourseRoutingTest {
                         "garmin.workouts.token-directory=.", "garmin.workouts.session-file=")
                 .run(context -> assertThat(context).hasSingleBean(GarminConnectWorker.class)
                         .hasSingleBean(CourseLibrary.class).hasSingleBean(GarminConnectService.class));
-        config.withPropertyValues("garmin.courses.enabled=true", "garmin.workouts.python=/python",
-                        "garmin.workouts.script=/script", "garmin.workouts.token-directory=.", "garmin.workouts.session-file=")
-                .run(context -> assertThat(context).hasSingleBean(reads).doesNotHaveBean(writes));
+        var session = config.withPropertyValues("garmin.workouts.python=/python", "garmin.workouts.script=/script",
+                "garmin.workouts.token-directory=.", "garmin.workouts.session-file=");
+        session.withPropertyValues("garmin.courses.enabled=true").run(context -> {
+            assertThat(context).hasSingleBean(reads).doesNotHaveBean(writes).doesNotHaveBean(DeviceSendService.class);
+            assertThat(context.getBean("deviceToolSpecifications")).asInstanceOf(list(SyncToolSpecification.class)).isEmpty();
+        });
+        session.withPropertyValues("garmin.workouts.enabled=true").run(context -> {
+            assertThat(context.getBean("deviceToolSpecifications")).asInstanceOf(list(SyncToolSpecification.class))
+                    .extracting(spec -> spec.tool().name()).containsExactly("garmin_list_devices", "garmin_send_to_device");
+            assertThatThrownBy(() -> context.getBean(DeviceSendService.class).send(null, 42L, "7", true))
+                    .hasMessage("device_send_disabled");
+        });
         config.withPropertyValues("garmin.courses.routing.url=https://ors.test")
                 .run(context -> assertThat(context).hasSingleBean(CourseRouter.class)
                         .hasSingleBean(StrengthWorkouts.class)
