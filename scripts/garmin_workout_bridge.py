@@ -1,5 +1,7 @@
 """Manage a workout in the verified owner's Garmin Connect library."""
 
+import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -7,6 +9,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 import re
+import runpy
+import stat
 import sys
 import tempfile
 import time
@@ -460,45 +464,97 @@ def publish(garmin, request):
     return {"status": "workout_rejected"}
 
 
-def main(token_dir):
-    raw = sys.stdin.buffer.read(16_385)
-    if len(raw) > 16_384:
-        return {"status": "workout_rejected"}
+def session_lock(token_file):
+    directory = Path(tempfile.gettempdir()) / f"garmin-connect-locks-{os.getuid()}"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    owner = os.getuid()
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(directory_fd)
+        if info.st_uid != owner or info.st_mode & 0o077:
+            raise PermissionError("Invalid Garmin session lock directory")
+        key = hashlib.sha256(os.fsencode(token_file.resolve())).hexdigest()
+        lock_fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+    info = os.fstat(lock_fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or info.st_mode & 0o077 or info.st_nlink != 1:
+        os.close(lock_fd)
+        raise PermissionError("Invalid Garmin session lock file")
+    return os.fdopen(lock_fd, "a")
+
+
+def main(token_dir, courses=False):
+    limit = 8 * 1024 * 1024 if courses else 16_384
+    raw = sys.stdin.buffer.read(limit + 1)
+    if len(raw) > limit:
+        return {"status": "course_source_too_large" if courses else "workout_rejected"}
     request = json.loads(raw)
     token_file = Path(token_dir) / "garmin_tokens.json"
+    with session_lock(token_file) as lock:
+        return locked_publish(lock, token_file, request, courses)
+
+
+def locked_publish(lock, token_file, request, courses):
+    deadline = time.monotonic() + 8
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return {"status": "course_busy" if courses else "workout_service_unavailable"}
+            time.sleep(0.05)
+    unavailable = "course_account_unverified" if courses else "workout_session_unavailable"
     if not token_file.is_file() or token_file.stat().st_mode & 0o077:
-        return {"status": "workout_session_unavailable"}
+        return {"status": unavailable}
     garmin = Garmin()
     try:
         stored = token_file.read_text(encoding="utf-8")
         garmin.client.loads(stored)
     except Exception:
-        return {"status": "workout_session_unavailable"}
+        return {"status": unavailable}
     before = garmin.client.dumps()
     try:
+        if courses:
+            module = runpy.run_path(str(Path(__file__).with_name("garmin_courses_bridge.py")))
+            return module["publish"](garmin, request)
         return publish(garmin, request)
     finally:
-        refreshed = garmin.client.dumps()
-        if refreshed != before:
-            temporary = tempfile.NamedTemporaryFile(mode="w", dir=token_file.parent, delete=False, encoding="utf-8")
-            try:
-                with temporary:
-                    temporary.write(refreshed)
-                os.replace(temporary.name, token_file)
-            finally:
-                Path(temporary.name).unlink(missing_ok=True)
+        try:
+            refreshed = garmin.client.dumps()
+            if refreshed != before:
+                save_session(token_file, refreshed)
+        except (OSError, TypeError, ValueError):
+            if not courses:
+                raise
+
+
+def save_session(token_file, refreshed):
+    temporary = tempfile.NamedTemporaryFile(mode="w", dir=token_file.parent, delete=False, encoding="utf-8")
+    try:
+        with temporary:
+            temporary.write(refreshed)
+        os.replace(temporary.name, token_file)
+    finally:
+        Path(temporary.name).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
     os.umask(0o077)
     logging.disable(logging.CRITICAL)
+    courses = len(sys.argv) > 2 and sys.argv[2] == "courses"
     try:
-        result = main(sys.argv[1])
+        result = main(sys.argv[1], courses)
     except LibraryLimit:
         result = {"status": "workout_library_limit"}
     except Exception as error:
-        result = failure(error, "workout_service_unavailable")
+        result = failure(error, "garmin_unavailable" if courses else "workout_service_unavailable")
     output = json.dumps(result, ensure_ascii=False)
-    if len(output.encode("utf-8")) > 65_536:
-        output = '{"status":"workout_detail_limit"}'
+    export = courses and isinstance(result.get("data"), dict) and "contentBase64" in result["data"]
+    limit = 8 * 1024 * 1024 if courses else 65_536
+    if export:
+        limit = 4 * ((limit + 2) // 3) + 1024
+    if len(output.encode("utf-8")) > limit:
+        output = '{"status":"course_response_too_large"}' if courses else '{"status":"workout_detail_limit"}'
     print(output)

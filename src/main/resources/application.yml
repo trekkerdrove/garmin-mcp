@@ -22,6 +22,18 @@ garmin:
     script: ${GARMIN_WORKOUT_SCRIPT:scripts/garmin_workout_bridge.py}
     token-directory: ${GARMIN_CONNECT_TOKEN_DIR:}
     session-file: ${GARMIN_CONNECT_SESSION_FILE:}
+  courses:
+    enabled: ${GARMIN_COURSES_ENABLED:false}
+    writes-enabled: ${GARMIN_COURSE_WRITES_ENABLED:false}
+    verified-edit-fields: ${GARMIN_COURSE_VERIFIED_EDIT_FIELDS:name}
+    verified-point-types: ${GARMIN_COURSE_VERIFIED_POINT_TYPES:}
+    verified-native-exports: ${GARMIN_COURSE_VERIFIED_NATIVE_EXPORTS:gpx}
+    routing:
+      url: ${GARMIN_COURSE_ORS_URL:}
+      api-key: ${GARMIN_COURSE_ORS_KEY:}
+      profiles: ${GARMIN_COURSE_ORS_PROFILES:}
+      pelias-url: ${GARMIN_COURSE_PELIAS_URL:}
+      pelias-key: ${GARMIN_COURSE_PELIAS_KEY:}
 mcp:
   public-url: ${MCP_PUBLIC_URL:}
   oauth:

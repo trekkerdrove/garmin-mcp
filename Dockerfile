@@ -12,7 +12,7 @@ RUN apt-get update \
     && /opt/garmin-python/bin/pip install --no-cache-dir 'garminconnect==0.3.2' \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /workspace/target/garmin-mcp.jar ./garmin-mcp.jar
-COPY scripts/garmin_workout_bridge.py ./scripts/garmin_workout_bridge.py
+COPY scripts/garmin_workout_bridge.py scripts/garmin_courses_bridge.py ./scripts/
 USER 10001:10001
 EXPOSE 10000
 ENV PORT=10000

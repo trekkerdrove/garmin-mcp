@@ -9,15 +9,16 @@ import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader;
 import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort;
 import io.github.trekkerdrove.garminmcp.application.service.GarminConnectService;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration(proxyBeanMethods = false)
-@ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
+@ConditionalOnExpression("${garmin.workouts.enabled:false} || ${garmin.courses.enabled:false}")
 class GarminConnectConfiguration {
     @Bean
-    GarminConnectPort workoutPublisher(
+    GarminConnectWorker garminConnectWorker(
             @Value("${garmin.workouts.python}") String python,
             @Value("${garmin.workouts.script}") String script,
             @Value("${garmin.workouts.token-directory}") String tokenDirectory,
@@ -26,10 +27,17 @@ class GarminConnectConfiguration {
             throw new IllegalArgumentException("Set exactly one Garmin Connect session source.");
         }
         Path directory = sessionFile.isBlank() ? Path.of(tokenDirectory) : privateCopy(Path.of(sessionFile));
-        return new PythonGarminConnect(Path.of(python), Path.of(script), directory);
+        return new GarminConnectWorker(Path.of(python), Path.of(script), directory);
     }
 
     @Bean
+    @ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
+    GarminConnectPort workoutPublisher(GarminConnectWorker worker) {
+        return new PythonGarminConnect(worker);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
     GarminConnectService workouts(ActivityReader activities, GarminConnectPort publisher) {
         return new GarminConnectService(activities, publisher, Clock.systemUTC());
     }

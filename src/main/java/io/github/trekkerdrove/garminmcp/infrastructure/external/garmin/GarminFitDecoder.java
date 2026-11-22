@@ -33,7 +33,7 @@ final class GarminFitDecoder implements FitDecoder {
             throw new GarminFailure("fit_limit_exceeded");
         }
         try {
-            byte[] member = extract(archive, started);
+            byte[] member = extract(archive, started, MAX_EXPANDED);
             if (member == null) {
                 throw new GarminFailure("no_fit_member");
             }
@@ -60,7 +60,7 @@ final class GarminFitDecoder implements FitDecoder {
         }
     }
 
-    private static byte[] extract(byte[] archive, long started) throws IOException {
+    static byte[] extract(byte[] archive, long started, int maxExpanded) throws IOException {
         var bytes = ByteBuffer.wrap(archive).order(ByteOrder.LITTLE_ENDIAN);
         var directory = directory(bytes);
         int local = 0;
@@ -81,7 +81,7 @@ final class GarminFitDecoder implements FitDecoder {
                 for (int count; (count = zip.read(buffer)) >= 0;) {
                     checkDeadline(started);
                     expanded += count;
-                    if (expanded > MAX_EXPANDED) {
+                    if (expanded > maxExpanded) {
                         throw new GarminFailure("fit_limit_exceeded");
                     }
                     if (fit) {

@@ -1,124 +1,74 @@
 package io.github.trekkerdrove.garminmcp.infrastructure.external.garmin;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.FutureTask;
-import java.util.concurrent.TimeUnit;
 import io.github.trekkerdrove.garminmcp.application.dto.GarminFailure;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
 import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort;
-import tools.jackson.core.JacksonException;
-import tools.jackson.databind.json.JsonMapper;
 
 final class PythonGarminConnect implements GarminConnectPort {
     private static final Set<String> FAILURES = Set.of("workout_account_unverified", "workout_name_conflict",
             "workout_library_limit", "workout_rejected", "workout_write_unconfirmed", "workout_session_unavailable",
             "workout_service_unavailable", "garmin_rate_limited", "garmin_access_denied", "workout_not_found",
             "workout_unsupported", "workout_detail_limit", "invalid_input");
-    private static final int MAX_RESPONSE = 65_537;
-    private final JsonMapper json = JsonMapper.builder().build();
-    private final Path python;
-    private final Path script;
-    private final Path tokenDirectory;
+    private final GarminConnectWorker worker;
 
-    PythonGarminConnect(Path python, Path script, Path tokenDirectory) {
-        this.python = python.toAbsolutePath();
-        this.script = script.toAbsolutePath();
-        this.tokenDirectory = tokenDirectory.toAbsolutePath();
+    PythonGarminConnect(GarminConnectWorker worker) {
+        this.worker = worker;
     }
 
     @Override
     public ToolResult publish(Operation operation, Map<String, Object> args, long expectedActivityId) {
-        if (!Files.isRegularFile(tokenDirectory.resolve("garmin_tokens.json"))) {
-            throw new GarminFailure("workout_session_unavailable");
-        }
-        var command = new ProcessBuilder(python.toString(), "-I", script.toString(), tokenDirectory.toString())
-                .redirectError(ProcessBuilder.Redirect.DISCARD);
-        command.environment().clear();
-        Process worker = null;
         String failure = operation == Operation.search || operation == Operation.get || Boolean.FALSE.equals(args.get("confirm"))
                 ? "workout_service_unavailable"
                 : operation == Operation.set_weight ? "weight_write_unconfirmed" : "workout_write_unconfirmed";
-        try {
-            var request = new HashMap<>(args);
-            request.put("operation", operation);
-            request.put("expectedActivityId", expectedActivityId);
-            worker = command.start();
-            var output = worker.getInputStream();
-            var response = new FutureTask<>(() -> {
-                try (output) {
-                    return output.readNBytes(MAX_RESPONSE + 1);
+        var request = new HashMap<>(args);
+        request.put("operation", operation);
+        request.put("expectedActivityId", expectedActivityId);
+        var reply = worker.call(request, false, failure);
+        var status = reply.path("status").asString("");
+        var data = reply.path("data");
+        if (data.isObject() && switch (operation) {
+            case search -> status.equals("ok") || status.equals("no_data") || status.equals("truncated");
+            case get -> status.equals("ok") && data.path("workoutId").asLong() == (long) args.get("workoutId");
+            case duplicate -> data.path("sourceWorkoutId").asLong() == (long) args.get("workoutId")
+                    && (Boolean.TRUE.equals(args.get("confirm"))
+                        ? (status.equals("created") || status.equals("already_exists"))
+                            && data.path("workoutId").asLong() > 0
+                            && data.path("workoutId").asLong() != (long) args.get("workoutId")
+                        : status.equals("preview"));
+            case set_weight -> args.get("date").equals(data.path("date").asString())
+                    && Set.of("preview", "created", "updated", "already_exists", "selection_required",
+                            "weight_not_editable", "weight_measurement_not_found", "weight_cleanup_pending",
+                            "weight_measurement_changed").contains(status);
+            default -> false;
+        }) {
+            return new ToolResult(status, data);
+        }
+        long id = reply.path("workoutId").asLong(0);
+        if (operation == Operation.create && id > 0 && (status.equals("created") || status.equals("already_exists"))) {
+            var draft = (WorkoutDraft) args.get("workout");
+            return new ToolResult(status, Map.of("workoutId", id, "name", draft.name(), "reused", status.equals("already_exists")));
+        }
+        if ((operation == Operation.update || operation == Operation.delete)
+                && Long.valueOf(id).equals(args.get("workoutId"))) {
+            boolean confirm = Boolean.TRUE.equals(args.get("confirm"));
+            String name = reply.path("name").asString("");
+            boolean success = operation == Operation.delete ? status.equals("deleted")
+                    : status.equals("updated") || status.equals("unchanged");
+            if (!name.isBlank() && name.length() <= 512 && (confirm ? success : status.equals("preview"))) {
+                var details = new HashMap<String, Object>();
+                details.put("workoutId", id);
+                details.put("name", name);
+                if (!confirm && operation == Operation.update) {
+                    if (args.containsKey("name")) details.put("newName", args.get("name"));
+                    if (args.containsKey("steps")) details.put("replacementSteps", args.get("steps"));
                 }
-            });
-            Thread.startVirtualThread(response);
-            try (var input = worker.getOutputStream()) {
-                input.write(json.writeValueAsBytes(request));
-            }
-            if (!worker.waitFor(45, TimeUnit.SECONDS) || worker.exitValue() != 0) {
-                throw new GarminFailure(failure);
-            }
-            var bytes = response.get();
-            if (bytes.length == 0 || bytes.length > MAX_RESPONSE) {
-                throw new GarminFailure(failure);
-            }
-            var reply = json.readTree(bytes);
-            var status = reply.path("status").asString("");
-            var data = reply.path("data");
-            if (data.isObject() && switch (operation) {
-                case search -> status.equals("ok") || status.equals("no_data") || status.equals("truncated");
-                case get -> status.equals("ok") && data.path("workoutId").asLong() == (long) args.get("workoutId");
-                case duplicate -> data.path("sourceWorkoutId").asLong() == (long) args.get("workoutId")
-                        && (Boolean.TRUE.equals(args.get("confirm"))
-                            ? (status.equals("created") || status.equals("already_exists"))
-                                && data.path("workoutId").asLong() > 0
-                                && data.path("workoutId").asLong() != (long) args.get("workoutId")
-                            : status.equals("preview"));
-                case set_weight -> args.get("date").equals(data.path("date").asString())
-                        && Set.of("preview", "created", "updated", "already_exists", "selection_required",
-                                "weight_not_editable", "weight_measurement_not_found", "weight_cleanup_pending",
-                                "weight_measurement_changed").contains(status);
-                default -> false;
-            }) {
-                return new ToolResult(status, data);
-            }
-            long id = reply.path("workoutId").asLong(0);
-            if (operation == Operation.create && id > 0 && (status.equals("created") || status.equals("already_exists"))) {
-                var draft = (WorkoutDraft) args.get("workout");
-                return new ToolResult(status, Map.of("workoutId", id, "name", draft.name(), "reused", status.equals("already_exists")));
-            }
-            if ((operation == Operation.update || operation == Operation.delete)
-                    && Long.valueOf(id).equals(args.get("workoutId"))) {
-                boolean confirm = Boolean.TRUE.equals(args.get("confirm"));
-                String name = reply.path("name").asString("");
-                boolean success = operation == Operation.delete ? status.equals("deleted")
-                        : status.equals("updated") || status.equals("unchanged");
-                if (!name.isBlank() && name.length() <= 512 && (confirm ? success : status.equals("preview"))) {
-                    var details = new HashMap<String, Object>();
-                    details.put("workoutId", id);
-                    details.put("name", name);
-                    if (!confirm && operation == Operation.update) {
-                        if (args.containsKey("name")) details.put("newName", args.get("name"));
-                        if (args.containsKey("steps")) details.put("replacementSteps", args.get("steps"));
-                    }
-                    return new ToolResult(status, details);
-                }
-            }
-            throw new GarminFailure(FAILURES.contains(status) ? status : failure);
-        } catch (IOException | JacksonException | ExecutionException error) {
-            throw new GarminFailure(worker == null ? "workout_service_unavailable" : failure);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw new GarminFailure(failure);
-        } finally {
-            if (worker != null && worker.isAlive()) {
-                worker.destroyForcibly();
+                return new ToolResult(status, details);
             }
         }
+        throw new GarminFailure(FAILURES.contains(status) ? status : failure);
     }
 }

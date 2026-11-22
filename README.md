@@ -101,3 +101,13 @@ Après vérification de l’aperçu, ajoute `"confirm":true` aux mêmes argument
 Les six outils de bibliothèque et la saisie du poids portent le catalogue à 43 outils quand `GARMIN_WORKOUT_WRITES_ENABLED=true`. Génère une session en Terminal avec `uv run --script scripts/prototype_garmin_workout.py login --token-dir ~/.garmin-connect-workouts` sur ton poste. En local, installe `garminconnect==0.3.2` dans un environnement Python et indique son exécutable avec `GARMIN_WORKOUT_PYTHON`. Renseigne `GARMIN_CONNECT_TOKEN_DIR` avec le dossier privé de la session. Le serveur compare une activité récente à la Personal API avant tout accès à la bibliothèque pour vérifier que les deux accès visent le même compte.
 
 L’image Docker embarque le client Python. Sur Render, ajoute le fichier de la session dédiée aux **Secret Files**, puis règle `GARMIN_CONNECT_SESSION_FILE=/etc/secrets/garmin_tokens.json` et active l’écriture. Le serveur garde une copie privée pour renouveler la session pendant son exécution. Le système de fichiers de Render Free est éphémère. Remplace le fichier secret si Garmin refuse la session après un redémarrage. L’adaptateur utilise l’API interne Garmin Connect, dont les réponses et le mécanisme de connexion peuvent évoluer.
+
+## Gérer les parcours
+
+`GARMIN_COURSES_ENABLED=true` ouvre la bibliothèque, le détail et l’export avec la même session Garmin Connect. `GARMIN_COURSE_WRITES_ENABLED=true` ajoute la création privée, la duplication, la modification, la suppression et le suivi des opérations. Active ces bascules après la recette sur un compte de test.
+
+Le premier appel d’écriture renvoie l’aperçu et un `operationId` valide 15 minutes. Après validation, rappelle le même outil avec seulement `operationId` et `confirm: true`. Si le résultat reste incertain, consulte `garmin_get_course_operation` avec cet identifiant. Le serveur conserve l’état pendant une heure tant que le processus reste actif.
+
+Renseigne `GARMIN_COURSE_VERIFIED_EDIT_FIELDS` avec les champs vérifiés lors de la recette. Le renommage est la valeur initiale `name`. Les autres champs sont `description`, `sport`, `source` et `coursePoints`. Renseigne `GARMIN_COURSE_VERIFIED_POINT_TYPES` avec les types vérifiés, par exemple `water,danger`. L’export natif utilise `gpx` par défaut. Ajoute `fit` à `GARMIN_COURSE_VERIFIED_NATIVE_EXPORTS` après validation. La reconstruction TCX exige des timestamps de trace disponibles.
+
+`GARMIN_COURSE_ORS_URL` et `GARMIN_COURSE_ORS_KEY` configurent le routage indépendamment de Garmin. `GARMIN_COURSE_ORS_PROFILES` accepte des correspondances telles que `trail_running=foot-hiking`. Le géocodage textuel exige `GARMIN_COURSE_PELIAS_URL` et, selon l’instance, `GARMIN_COURSE_PELIAS_KEY`.

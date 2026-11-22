@@ -28,6 +28,7 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtAut
 import org.springframework.security.oauth2.server.resource.web.BearerTokenAuthenticationEntryPoint;
 import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.web.client.RestTemplate;
 
@@ -71,7 +72,9 @@ class McpSecurity {
     }
 
     @Bean
-    SecurityFilterChain mcpFilterChain(HttpSecurity http, RestTemplate oauthHttp) throws Exception {
+    SecurityFilterChain mcpFilterChain(HttpSecurity http, RestTemplate oauthHttp,
+            @Value("${garmin.courses.enabled:false}") boolean courses,
+            @Value("${garmin.courses.routing.url:}") String routing) throws Exception {
         http.csrf(AbstractHttpConfigurer::disable)
                 .requestCache(AbstractHttpConfigurer::disable)
                 .logout(AbstractHttpConfigurer::disable)
@@ -93,6 +96,9 @@ class McpSecurity {
                                             .scope("offline_access").tlsClientCertificateBoundAccessTokens(false)))
                             .jwt(jwt -> jwt.decoder(jwtDecoder(oauthHttp))))
                     .addFilterBefore(originFilter(), BearerTokenAuthenticationFilter.class);
+            if (courses || !routing.isBlank()) {
+                http.addFilterAfter(new CourseBodyLimit(MCP_REQUEST), AuthorizationFilter.class);
+            }
         }
         return http.build();
     }
