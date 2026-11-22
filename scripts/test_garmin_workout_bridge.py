@@ -2,7 +2,7 @@ import unittest
 from copy import deepcopy
 from unittest.mock import Mock
 
-from garmin_workout_bridge import GarminConnectConnectionError, build_payload, publish
+from garmin_workout_bridge import GarminConnectConnectionError, build_payload, build_strength_payload, publish, strength_shape
 
 
 class WorkoutBridgeTest(unittest.TestCase):
@@ -35,7 +35,7 @@ class WorkoutBridgeTest(unittest.TestCase):
     def test_reuse_compares_both_stored_pace_bounds(self):
         draft = {"name": "Original", "sport": "running", "steps": [
             {"kind": "interval", "distanceMeters": 1000, "paceSecondsPerKm": {"fast": 265, "slow": 275}}]}
-        saved = build_payload(draft)
+        saved = dict(build_payload(draft), workoutId=42)
         step = saved["workoutSegments"][0]["workoutSteps"][0]
         self.assertEqual(step["targetType"], {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone"})
         self.assertAlmostEqual(step["targetValueOne"], 1000 / 265)
@@ -50,6 +50,58 @@ class WorkoutBridgeTest(unittest.TestCase):
                 self.garmin.get_workout_by_id.return_value = changed
                 self.assertEqual(self.invoke("create", workout=draft)["status"], "workout_name_conflict")
         self.garmin.upload_workout.assert_not_called()
+
+    def test_strength_write_compares_charge_units_exercises_and_all_rests(self):
+        plan = {"name": "Strength", "sport": "strength_training", "steps": [
+            {"kind": "set", "category": "SQUAT", "exerciseName": "BARBELL_BACK_SQUAT", "reps": 8, "weightKg": 62.5},
+            {"kind": "rest", "durationSeconds": 120},
+            {"kind": "set", "category": "PLANK", "exerciseName": "PLANK", "durationSeconds": 45, "weightKg": None},
+        ]}
+        payload = build_strength_payload(plan)
+        saved = deepcopy(dict(payload, workoutId=123))
+        steps = saved["workoutSegments"][0]["workoutSteps"]
+        self.assertEqual(saved["sportType"]["sportTypeId"], 5)
+        self.assertEqual(steps[0]["weightValue"], 62.5)
+        self.assertEqual(steps[0]["weightUnit"]["unitKey"], "kilogram")
+        self.assertEqual(steps[1]["stepType"]["stepTypeKey"], "rest")
+        self.assertEqual(steps[2]["endCondition"]["conditionTypeKey"], "time")
+        self.assertNotIn("weightValue", steps[2])
+        self.garmin.get_workouts.return_value = []
+        self.garmin.upload_workout.return_value = {"workoutId": 123}
+        self.garmin.get_workout_by_id.return_value = saved
+        self.assertEqual(self.invoke("create_strength", workout=plan), {"status": "created", "workoutId": 123})
+        self.garmin.upload_workout.assert_called_once_with(payload)
+        self.garmin.get_workouts.return_value = [saved]
+        self.assertEqual(self.invoke("create_strength", workout=plan), {"status": "already_exists", "workoutId": 123})
+        self.garmin.get_workouts.return_value = [saved, {**saved, "workoutId": 124}]
+        self.assertEqual(self.invoke("create_strength", workout=plan)["status"], "workout_name_conflict")
+        self.garmin.get_workouts.return_value = [saved]
+        steps[1]["endConditionValue"] = 121
+        self.assertEqual(self.invoke("create_strength", workout=plan)["status"], "workout_name_conflict")
+        self.garmin.upload_workout.assert_called_once()
+        steps[1]["endConditionValue"] = 120
+        self.garmin.get_workouts.return_value = []
+        steps[0]["weightUnit"]["unitKey"] = "pound"
+        self.assertEqual(self.invoke("create_strength", workout=plan)["status"], "workout_write_unconfirmed")
+        self.garmin.get_workout_by_id.return_value = dict(deepcopy(payload), workoutId=124)
+        self.assertEqual(self.invoke("create_strength", workout=plan)["status"], "workout_write_unconfirmed")
+
+    def test_strength_repeat_normalizes_only_the_effective_rest_sequence(self):
+        exercise = {"kind": "set", "category": "SQUAT", "exerciseName": "BARBELL_BACK_SQUAT", "reps": 8}
+        rest = {"kind": "rest", "durationSeconds": 90}
+        flat = build_strength_payload({"name": "Strength", "steps": [exercise, rest, exercise]})
+        grouped = deepcopy(flat)
+        children = grouped["workoutSegments"][0]["workoutSteps"][:2]
+        group = {"type": "RepeatGroupDTO", "stepOrder": 1, "numberOfIterations": 2, "skipLastRestStep": True,
+                 "stepType": {"stepTypeKey": "repeat", "stepTypeId": 6},
+                 "endCondition": {"conditionTypeKey": "iterations", "conditionTypeId": 7}, "workoutSteps": children}
+        grouped["workoutSegments"][0]["workoutSteps"] = [group]
+        children[1]["stepType"] = {"stepTypeKey": "recovery", "stepTypeId": 4}
+        self.assertEqual(strength_shape(grouped), strength_shape(flat))
+        group["skipLastRestStep"] = False
+        self.assertNotEqual(strength_shape(grouped), strength_shape(flat))
+        group["numberOfIterations"] = 26
+        self.assertIsNone(strength_shape(grouped))
 
     def test_update_rejects_dropped_pace_and_cycling_target(self):
         steps = [{"kind": "interval", "durationSeconds": 60, "paceSecondsPerKm": {"fast": 270, "slow": 270}}]

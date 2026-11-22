@@ -7,16 +7,23 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader;
 import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort;
+import io.github.trekkerdrove.garminmcp.application.port.out.StrengthExerciseCatalog;
 import io.github.trekkerdrove.garminmcp.application.service.GarminConnectService;
+import io.github.trekkerdrove.garminmcp.application.service.StrengthWorkouts;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration(proxyBeanMethods = false)
-@ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
 class GarminConnectConfiguration {
     @Bean
+    StrengthWorkouts strengthWorkouts(StrengthExerciseCatalog catalog) {
+        return new StrengthWorkouts(catalog);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
     GarminConnectPort workoutPublisher(
             @Value("${garmin.workouts.python}") String python,
             @Value("${garmin.workouts.script}") String script,
@@ -30,6 +37,7 @@ class GarminConnectConfiguration {
     }
 
     @Bean
+    @ConditionalOnProperty(name = "garmin.workouts.enabled", havingValue = "true")
     GarminConnectService workouts(ActivityReader activities, GarminConnectPort publisher) {
         return new GarminConnectService(activities, publisher, Clock.systemUTC());
     }

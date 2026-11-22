@@ -53,6 +53,93 @@ def build_payload(draft):
     }
 
 
+STRENGTH = {"sportTypeKey": "strength_training", "sportTypeId": 5}
+KILOGRAM = {"unitId": 8, "unitKey": "kilogram", "factor": 1000.0}
+
+
+def build_strength_payload(plan):
+    steps = []
+    for order, entry in enumerate(plan["steps"], 1):
+        rest = entry["kind"] == "rest"
+        reps = entry.get("reps")
+        step = {
+            "type": "ExecutableStepDTO",
+            "stepOrder": order,
+            "stepType": {"stepTypeId": 5 if rest else 3, "stepTypeKey": "rest" if rest else "interval"},
+            "endCondition": {"conditionTypeId": 2 if reps is None else 10,
+                             "conditionTypeKey": "time" if reps is None else "reps"},
+            "endConditionValue": entry["durationSeconds"] if reps is None else reps,
+            "targetType": {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target"},
+        }
+        if not rest:
+            step.update(category=entry["category"], exerciseName=entry["exerciseName"])
+            if entry.get("weightKg") is not None:
+                step.update(weightValue=entry["weightKg"], weightUnit=KILOGRAM)
+        steps.append(step)
+    return {
+        "workoutName": plan["name"],
+        "sportType": STRENGTH,
+        "workoutSegments": [{"segmentOrder": 1, "sportType": STRENGTH, "workoutSteps": steps}],
+    }
+
+
+def strength_shape(workout):
+    try:
+        segment, = workout["workoutSegments"]
+        if any(sport.get(key) != value for sport in (workout["sportType"], segment["sportType"])
+               for key, value in STRENGTH.items()):
+            return None
+        return workout["workoutName"], tuple(strength_steps(segment["workoutSteps"]))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def strength_steps(steps, depth=0):
+    if not 1 <= len(steps) <= 50 or depth >= 50:
+        raise ValueError("Invalid strength step count")
+    effective = []
+    previous_order = 0
+    for step in steps:
+        if step["stepOrder"] <= previous_order:
+            raise ValueError("Invalid strength step order")
+        previous_order = step["stepOrder"]
+        kind = step["stepType"]["stepTypeKey"]
+        kind_id = step["stepType"]["stepTypeId"]
+        condition = step["endCondition"]["conditionTypeKey"]
+        condition_id = step["endCondition"]["conditionTypeId"]
+        value = step.get("endConditionValue")
+        if step["type"] == "RepeatGroupDTO":
+            count = step["numberOfIterations"]
+            if ((kind, kind_id, condition, condition_id) != ("repeat", 6, "iterations", 7)
+                    or type(count) is not int or not 1 <= count <= 50 or step.get("smartRepeat")
+                    or (value is not None and value != count)):
+                raise ValueError("Unsupported strength repeat")
+            children = strength_steps(step["workoutSteps"], depth + 1)
+            repeated = children * count
+            if step.get("skipLastRestStep") and children[-1][0] == "rest":
+                repeated.pop()
+            effective.extend(repeated)
+        else:
+            if (step["type"] != "ExecutableStepDTO"
+                    or step["targetType"]["workoutTargetTypeKey"] != "no.target"
+                    or step["targetType"]["workoutTargetTypeId"] != 1
+                    or (step.get("secondaryTargetType") or {}).get("workoutTargetTypeKey") not in {None, "no.target"}):
+                raise ValueError("Unsupported strength target")
+            weight = step.get("weightValue")
+            unit = step.get("weightUnit")
+            if weight is not None and (not unit or any(unit.get(k) != v for k, v in KILOGRAM.items())):
+                raise ValueError("Unsupported strength weight unit")
+            if (kind, kind_id, condition, condition_id) == ("recovery", 4, "time", 2):
+                kind, kind_id = "rest", 5
+            effective.append((kind, kind_id, condition, condition_id, value, step.get("category"),
+                              step.get("exerciseName"), weight))
+        if len(effective) > 50:
+            raise ValueError("Invalid strength step count")
+    if not effective:
+        raise ValueError("Empty strength workout")
+    return effective
+
+
 def pace_bounds(step):
     if step["targetType"]["workoutTargetTypeKey"] == "pace.zone":
         # Garmin may round stored speeds. Compare in the MCP's unit of whole seconds/km.
@@ -128,11 +215,17 @@ def create(garmin, draft):
     return save_copy(garmin, payload, workout_shape)
 
 
-def save_copy(garmin, payload, shape, source_id=None):
+def save_copy(garmin, payload, shape, source_id=None, *, unique_name=False):
     expected = shape(payload)
-    existing = named_workout(garmin, payload["workoutName"])
+    if expected is None:
+        return {"status": "workout_rejected"}
+    matches = (int(row["workoutId"]) for row in library(garmin) if row["workoutName"] == payload["workoutName"])
+    existing = next(matches, None)
     if existing is not None:
-        if existing != source_id and shape(garmin.get_workout_by_id(existing)) == expected:
+        if unique_name and next(matches, None) is not None:
+            return {"status": "workout_name_conflict"}
+        stored = read_workout(garmin, existing) if existing != source_id else None
+        if stored is not None and shape(stored) == expected:
             return {"status": "already_exists", "workoutId": existing}
         return {"status": "workout_name_conflict"}
 
@@ -142,8 +235,10 @@ def save_copy(garmin, payload, shape, source_id=None):
         return failure(error, "workout_write_unconfirmed")
     try:
         workout_id = int(uploaded["workoutId"])
-        if workout_id > 0 and workout_id != source_id and shape(garmin.get_workout_by_id(workout_id)) == expected:
-            return {"status": "created", "workoutId": workout_id}
+        if workout_id > 0 and workout_id != source_id:
+            stored = read_workout(garmin, workout_id)
+            if stored is not None and shape(stored) == expected:
+                return {"status": "created", "workoutId": workout_id}
     except Exception:
         pass
     return {"status": "workout_write_unconfirmed"}
@@ -446,6 +541,8 @@ def publish(garmin, request):
         return set_weight(garmin, request)
     if operation == "create":
         return create(garmin, request["workout"])
+    if operation == "create_strength":
+        return save_copy(garmin, build_strength_payload(request["workout"]), strength_shape, unique_name=True)
     if operation == "search":
         return search_workouts(garmin, request)
     if operation in {"get", "duplicate"}:

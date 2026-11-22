@@ -39,6 +39,10 @@ public final class GarminConnectService {
         return run(Operation.create, Map.of("workout", draft));
     }
 
+    ToolResult createStrength(StrengthWorkouts.Plan plan) {
+        return run(Operation.create_strength, Map.of("workout", plan));
+    }
+
     public ToolResult update(long workoutId, String name, List<WorkoutDraft.Step> steps, boolean confirm) {
         if (name == null && steps == null) {
             throw new IllegalArgumentException("Supply a name or steps");

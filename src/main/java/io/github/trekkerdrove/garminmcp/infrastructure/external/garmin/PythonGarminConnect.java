@@ -11,6 +11,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import io.github.trekkerdrove.garminmcp.application.dto.GarminFailure;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
+import io.github.trekkerdrove.garminmcp.application.service.StrengthWorkouts;
 import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort;
 import tools.jackson.core.JacksonException;
@@ -88,9 +89,11 @@ final class PythonGarminConnect implements GarminConnectPort {
                 return new ToolResult(status, data);
             }
             long id = reply.path("workoutId").asLong(0);
-            if (operation == Operation.create && id > 0 && (status.equals("created") || status.equals("already_exists"))) {
-                var draft = (WorkoutDraft) args.get("workout");
-                return new ToolResult(status, Map.of("workoutId", id, "name", draft.name(), "reused", status.equals("already_exists")));
+            if ((operation == Operation.create || operation == Operation.create_strength) && id > 0
+                    && (status.equals("created") || status.equals("already_exists"))) {
+                String name = operation == Operation.create ? ((WorkoutDraft) args.get("workout")).name()
+                        : ((StrengthWorkouts.Plan) args.get("workout")).name();
+                return new ToolResult(status, Map.of("workoutId", id, "name", name, "reused", status.equals("already_exists")));
             }
             if ((operation == Operation.update || operation == Operation.delete)
                     && Long.valueOf(id).equals(args.get("workoutId"))) {

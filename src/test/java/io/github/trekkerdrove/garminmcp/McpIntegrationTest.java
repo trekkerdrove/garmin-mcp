@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -26,6 +27,8 @@ import com.nimbusds.jwt.SignedJWT;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.trekkerdrove.garminmcp.application.dto.ConnectionResult;
+import io.github.trekkerdrove.garminmcp.application.port.out.StrengthExerciseCatalog;
+import io.github.trekkerdrove.garminmcp.application.port.out.StrengthExerciseCatalog.Exercise;
 import io.github.trekkerdrove.garminmcp.application.service.CheckGarminConnectionService;
 import io.github.trekkerdrove.garminmcp.infrastructure.external.garmin.GarminHttpClient;
 import org.junit.jupiter.api.AfterAll;
@@ -77,6 +80,13 @@ class McpIntegrationTest {
 
     @TestBean(methodName = "fakeGarminClient", enforceOverride = true)
     GarminHttpClient garminHttpClient;
+
+    @TestBean(enforceOverride = true)
+    StrengthExerciseCatalog strengthExercises;
+
+    static StrengthExerciseCatalog strengthExercises() {
+        return () -> List.of(new Exercise("SQUAT", "BARBELL_BACK_SQUAT"), new Exercise("SQUAT", "BARBELL_FRONT_SQUAT"));
+    }
 
     @DynamicPropertySource
     static void applicationProperties(DynamicPropertyRegistry registry) {
@@ -159,7 +169,7 @@ class McpIntegrationTest {
             assertThat(tool.path("annotations").path("readOnlyHint").asBoolean()).as(name).isTrue();
             assertThat(tool.path("annotations").path("destructiveHint").asBoolean(true)).as(name).isFalse();
         }
-        assertThat(names).containsExactlyInAnyOrderElementsOf(CatalogFixture.CATALOG).hasSize(36).doesNotHaveDuplicates();
+        assertThat(names).containsExactlyInAnyOrderElementsOf(CatalogFixture.CATALOG).hasSize(37).doesNotHaveDuplicates();
 
         int before = CatalogFixture.REQUESTS.get();
         assertThat(call("garmin_get_activity", Map.of("activityId", -1), token).path("status").asString())
@@ -175,6 +185,7 @@ class McpIntegrationTest {
             }
             var properties = tool.path("inputSchema").path("properties");
             var args = new LinkedHashMap<String, Object>();
+            if (name.equals("garmin_search_strength_exercises")) args.put("query", "squat à la barre");
             if (properties.has("activityId")) args.put("activityId", 42);
             for (String field : new String[]{"date", "startDate", "endDate"}) {
                 if (properties.has(field)) args.put(field, CatalogFixture.DAY);
@@ -190,6 +201,9 @@ class McpIntegrationTest {
             assertThat(result.path("status").asString()).as("%s %s", name, result).isEqualTo(expected);
             var data = result.path("data");
             switch (name) {
+                case "garmin_search_strength_exercises" ->
+                    assertThat(data.path("exercises").valueStream().map(row -> row.path("exerciseName").asString()))
+                            .containsExactly("BARBELL_BACK_SQUAT", "BARBELL_FRONT_SQUAT");
                 case "running_distance" -> assertThat(data.path("distanceKm").asDouble()).isEqualTo(5);
                 case "compare_sleep_by_training_day" -> assertThat(data.at("/training/meanSleepSeconds").asInt()).isEqualTo(24000);
                 case "garmin_get_daily_summary", "garmin_get_steps" -> assertThat(data.at("/observations/0/values/totalSteps").asInt(-1)).isZero();

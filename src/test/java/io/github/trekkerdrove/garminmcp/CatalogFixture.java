@@ -25,7 +25,7 @@ final class CatalogFixture {
     static final String LOT_3 = "garmin_analyze_activity_file garmin_get_fit_samples";
     static final Set<String> CATALOG = new LinkedHashSet<>();
     static {
-        for (String lot : new String[]{"garmin_check_connection", LOT_1, LOT_2, LOT_3}) {
+        for (String lot : new String[]{"garmin_check_connection", LOT_1, LOT_2, LOT_3, "garmin_search_strength_exercises"}) {
             CATALOG.addAll(java.util.List.of(lot.split("\\s+")));
         }
     }
