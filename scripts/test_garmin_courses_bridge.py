@@ -30,7 +30,7 @@ def transport(*replies):
     client = Mock(_connectapi="https://connect.example")
     client._fresh_api_session.side_effect = lambda: nullcontext(session)
     client._token_expires_soon.return_value = False
-    client.get_api_headers.return_value = {"Authorization": "fixture"}
+    client.get_api_headers.return_value = {"Authorization": "fixture", "Accept": "application/json"}
     return Mock(client=client, garmin_connect_activities="/activities"), session
 
 
@@ -103,11 +103,13 @@ class CourseBridgeTest(unittest.TestCase):
 
     def test_create_projects_private_payload_and_reads_unknown_elevation(self):
         current = course()
+        current["coursePoints"][0]["timestamp"] = 0
         projected = bridge.snapshot(current)
         self.assertEqual(projected["summary"]["sport"], "gravel_cycling")
         self.assertEqual(bridge.summary({**current, "activityTypePk": 4})["sport"], "other")
         self.assertEqual(projected["content"]["segments"][0][0]["elevationMeters"], 0)
         self.assertIsNone(projected["content"]["segments"][0][1]["elevationMeters"])
+        self.assertIsNone(projected["content"]["coursePoints"][0]["timestamp"])
         self.assertEqual(projected["related"], ["Power Guide"])
         self.request.side_effect = [[{"activityId": 42}], {"courseId": 18}]
         reply = self.run_command("create", content=projected["content"])
@@ -118,6 +120,24 @@ class CourseBridgeTest(unittest.TestCase):
         self.assertEqual(payload["coursePoints"][0]["coursePointType"], "WATER")
         self.assertEqual(payload["geoPoints"][0]["elevation"], 0)
         self.assertIsNone(payload["geoPoints"][1]["elevation"])
+        self.assertIsNone(payload["geoPoints"][0]["distance"])
+
+    def test_timed_geometry_sends_cumulative_distances_on_create_and_replace(self):
+        current = course()
+        content = bridge.snapshot(current)["content"]
+        points = content["segments"][0]
+        points[0]["timestamp"] = "2026-04-02T18:00:00Z"
+        points[1]["timestamp"] = "2026-04-02T18:10:00Z"
+        created = bridge.create_payload(content)["geoPoints"]
+        updated = bridge.update_payload(current, content, {"source"})["geoPoints"]
+        self.assertEqual(created, updated)
+        self.assertEqual(created[0]["distance"], 0)
+        self.assertGreater(created[1]["distance"], 0)
+        self.assertEqual(created[1]["timestamp"] - created[0]["timestamp"], 600_000)
+        points[1]["timestamp"] = points[0]["timestamp"]
+        with self.assertRaises(bridge.CourseError) as failure:
+            bridge.create_payload(content)
+        self.assertEqual(failure.exception.status, "invalid_input")
 
     def test_preservation_fingerprints_and_both_geometry_metric_aliases(self):
         current = course()
@@ -220,6 +240,15 @@ class TransportTest(unittest.TestCase):
                 bridge.request(garmin, method, f"{bridge.ROOT}/17")
             self.assertEqual((failure.exception.status, failure.exception.retry_after), (status, delay))
         self.assertEqual(session.request.call_count, 3)
+
+    def test_native_download_requests_binary_without_changing_json_accept(self):
+        garmin, session = transport(response(200, b"FIT data"), response(200, {"courseId": 17}))
+        url = f"{bridge.ROOT}/fit/17/0"
+        self.assertEqual(bridge.request(garmin, "GET", url, binary=True), b"FIT data")
+        self.assertEqual(bridge.request(garmin, "GET", f"{bridge.ROOT}/17"), {"courseId": 17})
+        requests = session.request.call_args_list
+        self.assertEqual(requests[0].kwargs["headers"], {"Authorization": "fixture", "Accept": "*/*"})
+        self.assertEqual(requests[1].kwargs["headers"], {"Authorization": "fixture", "Accept": "application/json"})
 
     def test_401_on_a_mutation_does_not_refresh_and_send_again(self):
         response = Mock(status_code=401)

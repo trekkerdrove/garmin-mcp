@@ -237,10 +237,60 @@ class CourseServiceTest {
                 {"name":"Eau","type":"water","latitude":0,"longitude":0,"distanceMeters":0,
                  "timestamp":"2026-04-02T18:00:00.123000+00:00"}
                 """, NavigationPoint.class);
-        var geometry = points(List.of(new Point(-0.0, -0.0, null, "2026-04-02T18:00:00.123Z"), LINE.getLast()));
+        var geometry = points(List.of(new Point(-0.0, -0.0, null, "2026-04-02T18:00:00.123Z"),
+                new Point(47.01, 2.01, 15.0, START.plusSeconds(600).toString())));
         var coursePoints = List.of(new NavigationPoint("Eau", "water", -0.0, -0.0, -0.0, "2026-04-02T20:00:00.123+02:00"));
         var preview = service.prepare(Action.create, null, new Changes("Loop", null, null, geometry, coursePoints, false));
         assertThat(service.confirm(Action.create, operationId(preview)).status()).isEqualTo("created");
+    }
+
+    @Test
+    void confirmsGarminCoordinateRoundingAndGeneratedDataButRejectsChangedGeometry() {
+        library.savedProjection = content -> new Content(content.name(), content.sport(), content.description(), content.privacy(),
+                content.segments().stream().map(line -> line.stream().map(point -> new Point(
+                        point.latitude() + 0.00000005, point.longitude() - 0.00000003,
+                        point.elevationMeters() == null ? 47.63 : point.elevationMeters(),
+                        point.timestamp() == null ? START.toString() : point.timestamp())).toList()).toList(),
+                content.coursePoints());
+        var original = new Changes("Loop", null, null, points(List.of(new Point(47.0, 2.0, null, null), LINE.getLast())),
+                List.of(new NavigationPoint("Eau", "water", 47.0, 2.0, 0d, null)), false);
+        var created = service.confirm(Action.create, operationId(service.prepare(Action.create, null, original)));
+        assertThat(created.status()).isEqualTo("created");
+        long id = (long) data(created).get("courseId");
+        assertThat(service.confirm(Action.create, operationId(service.prepare(Action.create, null, original))).status())
+                .isEqualTo("already_exists");
+        assertThat(library.created).hasValue(1);
+
+        var replacement = points(timedLine(47.03));
+        var edit = new Changes(null, null, null, replacement, List.of(), false);
+        var updated = service.confirm(Action.update, operationId(service.prepare(Action.update, id, edit)));
+        assertThat(updated.status()).isEqualTo("updated");
+        assertThat(data(updated)).containsEntry("courseId", id);
+
+        library.savedProjection = content -> new Content(content.name(), content.sport(), content.description(), content.privacy(),
+                List.of(timedLine(48.0)), content.coursePoints());
+        var changed = new Changes(null, null, null, points(timedLine(47.04)), null, false);
+        assertThat(service.confirm(Action.update, operationId(service.prepare(Action.update, id, changed))).status())
+                .isEqualTo("course_write_unconfirmed");
+    }
+
+    @Test
+    void refusesTimedTracesWithoutStrictlyIncreasingTimeAndDistanceAtPreview() {
+        var start = new Point(47.0, 2.0, null, START.toString());
+        for (var line : List.of(List.of(start, LINE.getLast()),
+                List.of(start, new Point(47.01, 2.01, null, START.toString())),
+                List.of(start, new Point(47.0, 2.0, null, START.plusSeconds(10).toString()), LINE.getLast()))) {
+            assertThatThrownBy(() -> service.prepare(Action.create, null,
+                    new Changes("Loop", null, null, points(line), null, false)))
+                    .isInstanceOfSatisfying(Problem.class,
+                            failure -> assertThat(failure.details().toString()).contains("increasing time and distance"));
+        }
+        assertThat(library.created).hasValue(0);
+    }
+
+    private static List<Point> timedLine(double endLatitude) {
+        return List.of(new Point(47.0, 2.0, null, START.toString()),
+                new Point(endLatitude, 2.01, null, START.plusSeconds(600).toString()));
     }
 
     @Test
@@ -453,6 +503,7 @@ class CourseServiceTest {
         CountDownLatch pause;
         byte[] nativeExport;
         NavigationPoint wireNavigation;
+        java.util.function.UnaryOperator<Content> savedProjection = java.util.function.UnaryOperator.identity();
         String droppedField;
         boolean quota;
         boolean vanished;
@@ -510,14 +561,14 @@ class CourseServiceTest {
                 content = new Content(content.name(), content.sport(), content.description(), content.privacy(),
                         content.segments(), List.of(wireNavigation));
             }
-            store(id, content);
+            store(id, savedProjection.apply(content));
             hidden = lost;
             return lost ? new Mutation("course_write_unconfirmed", null, null) : new Mutation("accepted", id, null);
         }
 
         @Override public Mutation update(long accountActivityId, Snapshot current, Content target, Set<String> fields) {
             long id = current.summary().courseId();
-            store(id, target);
+            store(id, savedProjection.apply(target));
             return new Mutation("accepted", id, null);
         }
 

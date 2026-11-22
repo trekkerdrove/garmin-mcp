@@ -381,9 +381,11 @@ public final class CourseService {
             points = projected;
         }
         if (!update || replacing) {
-            segments = segments.stream().map(segment -> segment.stream().map(point -> new Point(
-                    point.latitude(), point.longitude(), point.elevationMeters(), millisecondTime(point.timestamp(), losses))).toList()).toList();
-            if (segments.stream().flatMap(List::stream).anyMatch(point -> point.elevationMeters() == null)) {
+            var line = segments.getFirst().stream().map(point -> new Point(point.latitude(), point.longitude(),
+                    point.elevationMeters(), millisecondTime(point.timestamp(), losses))).toList();
+            validateTrackTimes(line);
+            segments = List.of(line);
+            if (line.stream().anyMatch(point -> point.elevationMeters() == null)) {
                 warnings.add("Garmin may supplement missing elevations.");
             }
         }
@@ -415,6 +417,19 @@ public final class CourseService {
             return new ToolResult("course_data_loss", preview);
         }
         return preview(action, account, current, target, diff.keySet(), preview);
+    }
+
+    private static void validateTrackTimes(List<Point> line) {
+        if (line.stream().noneMatch(point -> point.timestamp() != null)) return;
+        Point previous = null;
+        for (Point point : line) {
+            if (point.timestamp() == null || previous != null
+                    && (!Instant.parse(point.timestamp()).isAfter(Instant.parse(previous.timestamp()))
+                        || CourseGeometry.distance(previous, point) <= 0)) {
+                throw new Problem("invalid_input", "A timed course needs a timestamp on every track point and strictly increasing time and distance.");
+            }
+            previous = point;
+        }
     }
 
     private static void validateNavigation(NavigationPoint point) {
@@ -576,7 +591,7 @@ public final class CourseService {
                 long id = op.action == Action.update ? op.courseId() : op.candidate;
                 if (!createsCourse(op) || !op.priorIds.contains(id)) {
                     var course = library.get(op.account, id);
-                    if (course.isPresent() && equal(op.target, course.get().content(), true,
+                    if (course.isPresent() && matchesSaved(op.target, course.get().content(),
                             op.action != Action.update || op.fields.contains("source"))
                             && (op.action != Action.update || preservesFields(op, course.get()))) {
                         return saved(op, op.action == Action.update ? "updated" : "created", course.get());
@@ -612,18 +627,18 @@ public final class CourseService {
         for (var row : rows) {
             var course = library.get(op.account, row.courseId(), remaining(deadline)).orElseThrow(
                     () -> new Problem("course_busy", "The owner library changed while checking an equivalent course."));
-            if (equal(op.target, course.content(), reconcile, reconcile)) matches.add(course);
+            if (matchesSaved(op.target, course.content(), true)) matches.add(course);
         }
         remaining(deadline);
         return matches;
     }
 
-    private static boolean equal(Content expected, Content actual, boolean readBack, boolean supplementElevation) {
+    private static boolean matchesSaved(Content expected, Content actual, boolean generatedTrack) {
         if (Objects.equals(expected, actual)) return true;
-        if (!readBack || !Objects.equals(expected.name(), actual.name()) || !Objects.equals(expected.sport(), actual.sport())
+        if (!Objects.equals(expected.name(), actual.name()) || !Objects.equals(expected.sport(), actual.sport())
                 || !Objects.equals(expected.privacy(), actual.privacy())
                 || !Objects.equals(emptyAsNull(expected.description()), emptyAsNull(actual.description()))
-                || !expected.coursePoints().equals(actual.coursePoints())
+                || !matchesNavigation(expected.coursePoints(), actual.coursePoints())
                 || expected.segments().size() != actual.segments().size()) return false;
         for (int i = 0; i < expected.segments().size(); i++) {
             var before = expected.segments().get(i);
@@ -632,14 +647,33 @@ public final class CourseService {
             for (int j = 0; j < before.size(); j++) {
                 Point point = before.get(j);
                 Point saved = after.get(j);
-                if (Double.compare(point.latitude(), saved.latitude()) != 0
-                        || Double.compare(point.longitude(), saved.longitude()) != 0
-                        || (!supplementElevation || point.elevationMeters() != null)
+                // Garmin quantizes saved track coordinates to FIT semicircles.
+                if (CourseGeometry.distance(point, saved) > 0.02
+                        || (!generatedTrack || point.elevationMeters() != null)
                             && !Objects.equals(point.elevationMeters(), saved.elevationMeters())
-                        || !Objects.equals(point.timestamp(), saved.timestamp())) return false;
+                        || (!generatedTrack || point.timestamp() != null)
+                            && !Objects.equals(point.timestamp(), saved.timestamp())) return false;
             }
         }
         return true;
+    }
+
+    private static boolean matchesNavigation(List<NavigationPoint> expected, List<NavigationPoint> actual) {
+        if (expected.size() != actual.size()) return false;
+        for (int i = 0; i < expected.size(); i++) {
+            var point = expected.get(i);
+            var saved = actual.get(i);
+            if (!Objects.equals(point.name(), saved.name()) || !Objects.equals(point.type(), saved.type())
+                    || !near(point.latitude(), saved.latitude(), 0.0000001)
+                    || !near(point.longitude(), saved.longitude(), 0.0000001)
+                    || !near(point.distanceMeters(), saved.distanceMeters(), 0.05)
+                    || point.timestamp() != null && !Objects.equals(point.timestamp(), saved.timestamp())) return false;
+        }
+        return true;
+    }
+
+    private static boolean near(Double expected, Double actual, double tolerance) {
+        return expected == null || actual == null ? Objects.equals(expected, actual) : Math.abs(expected - actual) <= tolerance;
     }
 
     private ToolResult saved(Operation op, String status, Snapshot course) {

@@ -44,10 +44,13 @@ def request(garmin, method, path, *, payload=None, binary=False, params=None):
     client = garmin.client
     if client._token_expires_soon():
         client._refresh_session()
+    headers = client.get_api_headers()
+    if binary:
+        headers = {**headers, "Accept": "*/*"}
     # The pinned request helper replays a 401 for every HTTP verb and buffers the complete body.
     with client._fresh_api_session() as session:
         with session.request(method, f"{client._connectapi}{path}", json=payload, params=params,
-                             headers=client.get_api_headers(), timeout=(4, 10), stream=True,
+                             headers=headers, timeout=(4, 10), stream=True,
                              allow_redirects=False) as response:
             status = response.status_code
             if status in {401, 403, 412}:
@@ -184,9 +187,10 @@ def trace_point(point):
 def navigation(point):
     kind = text(point.get("coursePointType"))
     normalized = {"HORS_CATEGORIE": "hors_category"}.get(kind, kind.lower() if kind else None)
+    timestamp = point.get("timestamp")
     return {"name": text(point.get("name")), "type": normalized,
             "latitude": number(first(point, "lat", "latitude")), "longitude": number(first(point, "lon", "longitude")),
-            "distanceMeters": number(point.get("distance")), "timestamp": instant(point.get("timestamp"))}
+            "distanceMeters": number(point.get("distance")), "timestamp": None if timestamp == 0 else instant(timestamp)}
 
 
 def revision(document):
@@ -236,15 +240,29 @@ def snapshot(document):
             "related": related, "warnings": warnings}
 
 
+def distance_meters(previous, current):
+    lat1, lat2 = math.radians(previous["latitude"]), math.radians(current["latitude"])
+    dlon = math.radians(math.remainder(current["longitude"] - previous["longitude"], 360))
+    a = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return 2 * 6_371_008.8 * math.asin(math.sqrt(min(1, a)))
+
+
 def geometry(content):
-    points = []
-    for segment in content["segments"]:
-        for point in segment:
-            points.append({"latitude": point["latitude"], "longitude": point["longitude"],
-                           "elevation": point.get("elevationMeters"), "distance": None,
-                           "timestamp": milliseconds(point.get("timestamp"))})
+    points = [{"latitude": point["latitude"], "longitude": point["longitude"],
+               "elevation": point.get("elevationMeters"), "distance": None,
+               "timestamp": milliseconds(point.get("timestamp"))}
+              for segment in content["segments"] for point in segment]
     if len(points) < 2:
         raise CourseError("course_no_geometry")
+    if any(point["timestamp"] is not None for point in points):
+        if points[0]["timestamp"] is None:
+            raise CourseError("invalid_input")
+        points[0]["distance"] = 0.0
+        for previous, point in zip(points, points[1:]):
+            step = distance_meters(previous, point)
+            if point["timestamp"] is None or point["timestamp"] <= previous["timestamp"] or step <= 0:
+                raise CourseError("invalid_input")
+            point["distance"] = previous["distance"] + step
     return {"geoPoints": points, "startPoint": points[0], "courseLines": []}
 
 
