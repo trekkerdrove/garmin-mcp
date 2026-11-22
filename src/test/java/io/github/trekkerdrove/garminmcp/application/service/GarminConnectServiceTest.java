@@ -35,6 +35,17 @@ class GarminConnectServiceTest {
             new Step(Kind.warmup, 120, null, null, null), new Step(Kind.interval, null, 400, 3, null)));
 
     @Test
+    void coachUsesParisCivilDayAndSixDaysAfterIt() {
+        var activity = new ActivityReader.Activity(42, null, LocalDate.of(2026, 3, 29), "running",
+                Map.of(), Map.of(), Map.of(), new ActivityReader.Selection(List.of(), false), Map.of(), Map.of());
+        when(activities.search(Map.of(), 0, 1, SearchView.SUMMARY)).thenReturn(List.of(activity));
+        var result = ToolResult.ok(Map.of("entries", List.of()));
+        when(publisher.publish(Operation.coach_workouts,
+                Map.of("startDate", "2026-03-30", "endDate", "2026-04-05"), 42)).thenReturn(result);
+        assertThat(service.getCoachWorkouts()).isEqualTo(result);
+    }
+
+    @Test
     void weightUsesParisCivilDayAndRejectsFutureOrNonexistentTimes() {
         var kg = new BigDecimal("72.4");
         var activity = new ActivityReader.Activity(42, null, LocalDate.of(2026, 3, 29), "running",

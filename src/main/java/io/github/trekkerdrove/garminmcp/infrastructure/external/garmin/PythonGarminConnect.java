@@ -22,6 +22,7 @@ final class PythonGarminConnect implements GarminConnectPort {
             "workout_library_limit", "workout_rejected", "workout_write_unconfirmed", "workout_session_unavailable",
             "workout_service_unavailable", "garmin_rate_limited", "garmin_access_denied", "workout_not_found",
             "workout_unsupported", "workout_detail_limit", "invalid_input");
+    private static final Set<String> COACH_RESULTS = Set.of("ok", "partial", "no_data", "no_active_plan", "coach_read_failed");
     private static final int MAX_RESPONSE = 65_537;
     private final JsonMapper json = JsonMapper.builder().build();
     private final Path python;
@@ -43,7 +44,8 @@ final class PythonGarminConnect implements GarminConnectPort {
                 .redirectError(ProcessBuilder.Redirect.DISCARD);
         command.environment().clear();
         Process worker = null;
-        String failure = operation == Operation.search || operation == Operation.get || Boolean.FALSE.equals(args.get("confirm"))
+        String failure = operation == Operation.search || operation == Operation.get
+                || operation == Operation.coach_workouts || Boolean.FALSE.equals(args.get("confirm"))
                 ? "workout_service_unavailable"
                 : operation == Operation.set_weight ? "weight_write_unconfirmed" : "workout_write_unconfirmed";
         try {
@@ -61,7 +63,8 @@ final class PythonGarminConnect implements GarminConnectPort {
             try (var input = worker.getOutputStream()) {
                 input.write(json.writeValueAsBytes(request));
             }
-            if (!worker.waitFor(45, TimeUnit.SECONDS) || worker.exitValue() != 0) {
+            // Coach can use four requests plus a session refresh.
+            if (!worker.waitFor(operation == Operation.coach_workouts ? 95 : 45, TimeUnit.SECONDS) || worker.exitValue() != 0) {
                 throw new GarminFailure(failure);
             }
             var bytes = response.get();
@@ -74,6 +77,10 @@ final class PythonGarminConnect implements GarminConnectPort {
             if (data.isObject() && switch (operation) {
                 case search -> status.equals("ok") || status.equals("no_data") || status.equals("truncated");
                 case get -> status.equals("ok") && data.path("workoutId").asLong() == (long) args.get("workoutId");
+                case coach_workouts -> COACH_RESULTS.contains(status)
+                        && args.get("startDate").equals(data.path("startDate").asString())
+                        && args.get("endDate").equals(data.path("endDate").asString())
+                        && data.path("weeks").isArray() && data.path("entries").isArray();
                 case duplicate -> data.path("sourceWorkoutId").asLong() == (long) args.get("workoutId")
                         && (Boolean.TRUE.equals(args.get("confirm"))
                             ? (status.equals("created") || status.equals("already_exists"))

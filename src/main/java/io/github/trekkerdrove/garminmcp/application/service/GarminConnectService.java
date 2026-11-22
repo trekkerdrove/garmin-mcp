@@ -68,6 +68,11 @@ public final class GarminConnectService {
         return run(Operation.get, target(workoutId, false));
     }
 
+    public ToolResult getCoachWorkouts() {
+        var today = LocalDate.now(clock.withZone(PARIS));
+        return run(Operation.coach_workouts, Map.of("startDate", today.toString(), "endDate", today.plusDays(6).toString()));
+    }
+
     public ToolResult duplicate(long workoutId, String name, List<WorkoutDraft.DistanceChange> changes, boolean confirm) {
         var args = new HashMap<>(target(workoutId, confirm));
         args.put("name", WorkoutDraft.validName(name));

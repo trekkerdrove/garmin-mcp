@@ -1,9 +1,9 @@
-"""Manage a workout in the verified owner's Garmin Connect library."""
+"""Use the verified owner's Garmin Connect session."""
 
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import re
@@ -17,6 +17,7 @@ from garminconnect import Garmin, GarminConnectConnectionError
 
 SPORTS = {"running": 1, "walking": 12, "cycling": 2}
 KINDS = {"warmup": 1, "cooldown": 2, "interval": 3, "recovery": 4}
+MAX_RESPONSE_BYTES = 65_536
 # Garmin computes BMI for a manual weight, even without any scale data.
 COMPOSITION_FIELDS = ("bodyFat", "bodyWater", "boneMass", "muscleMass", "physiqueRating",
                       "visceralFat", "visceralFatMass", "visceralFatRating", "metabolicAge", "basalMet", "activeMet")
@@ -297,6 +298,181 @@ def selected_fields(data, names):
     return {key: data[key] for key in names if data.get(key) is not None}
 
 
+def coach_fields(data, fields):
+    return {name: data[key] for key, name in fields.items()
+            if type(data.get(key)) in (str, int, float, bool)}
+
+
+def coach_sport_key(value):
+    return value.get("sportTypeKey") if isinstance(value, dict) else value
+
+
+def coach_sport(value):
+    value = coach_sport_key(value)
+    if isinstance(value, str):
+        words = set(re.findall(r"[a-z]+", value.lower()))
+        if words & {"bike", "biking", "cycle", "cycling", "swim", "swimming",
+                    "walk", "walking", "triathlon", "multisport"} or {"multi", "sport"} <= words:
+            return "other"
+        if words & {"run", "running", "marathon"}:
+            return "running"
+        if words & {"strength", "cardio"}:
+            return "supplemental"
+    return None
+
+
+def coach_plan_sport(plan, details):
+    for data in (plan, details):
+        for key in ("sportType", "sport"):
+            sport = coach_sport(data.get(key))
+            if sport is not None:
+                return sport
+    for value in (details.get("trainingType"), plan.get("planName")):
+        sport = coach_sport(value)
+        if sport is not None:
+            return sport
+    return None
+
+
+def coach_plan_summary(plan, details):
+    race = details.get("athleteRace")
+    return {
+        **coach_fields(plan, {"trainingPlanId": "trainingPlanId", "planName": "name",
+                              "trainingPlanClassification": "classification"}),
+        **coach_fields(details, {"trainingType": "trainingType", "workoutsPerWeek": "workoutsPerWeek",
+                                 "remainingAtpWorkoutsForWeek": "remainingWorkoutsThisWeek",
+                                 "registrationDate": "registrationDate", "planCompleted": "planCompleted"}),
+        **coach_fields(race if isinstance(race, dict) else {}, {"raceName": "raceName", "raceDay": "raceDay"}),
+    }
+
+
+def coach_entry(row, day, plan):
+    sport = coach_sport_key(row.get("workoutType"))
+    return {
+        "date": day.isoformat(),
+        **coach_fields(plan, {"trainingPlanId": "trainingPlanId", "planName": "planName"}),
+        **({"sport": sport} if isinstance(sport, str) else {}),
+        **coach_fields(row, {"scheduledWorkoutId": "scheduledWorkoutId", "workoutId": "workoutId",
+                             "workoutUuid": "workoutUuid", "fbtAdaptivePlanId": "fbtAdaptivePlanId",
+                             "tpType": "tpType", "workoutName": "name",
+                             "workoutPhrase": "workoutType", "isRestDay": "isRestDay", "race": "isRaceDay",
+                             "estimatedDurationInSecs": "estimatedDurationSeconds",
+                             "estimatedDistanceInMeters": "estimatedDistanceMeters",
+                             "trainingPlanId": "trainingPlanId", "tpPlanName": "planName"}),
+    }
+
+
+def coach_week(garmin, first, last):
+    result = garmin.query_garmin_graphql({
+        "query": f'query{{trainingPlanScalar(calendarDate:"{first}", lang:"en-US", firstDayOfWeek:"monday")}}'
+    })
+    if result.get("errors"):
+        raise ValueError("Garmin Coach query failed")
+    plans = result["data"]["trainingPlanScalar"]["trainingPlanWorkoutScheduleDTOS"]
+    if not isinstance(plans, list):
+        raise ValueError("Invalid Garmin Coach plans")
+    candidates = []
+    malformed = False
+    for plan in plans:
+        if not isinstance(plan, dict):
+            malformed = True
+            continue
+        details = plan.get("trainingPlanDetailsDTO")
+        if not isinstance(details, dict):
+            details = {}
+        if details.get("planCompleted") is True or plan.get("trainingPlanClassification") == "ITP":
+            continue
+        rows = plan.get("workoutScheduleSummaries")
+        if rows is None:
+            rows = []
+        summary = coach_plan_summary(plan, details)
+        if not isinstance(rows, list) or not ("trainingPlanId" in summary or "name" in summary):
+            malformed = True
+            continue
+        sports, entries, published = set(), [], False
+        for row in rows:
+            try:
+                day = date.fromisoformat(row["scheduleDate"])
+            except (KeyError, TypeError, ValueError):
+                malformed = True
+                continue
+            sport = coach_sport(row.get("workoutType"))
+            sports.add(sport)
+            if (first <= day <= last and (sport in (None, "running")
+                    or row.get("isRestDay") is True or row.get("race") is True)):
+                published = True
+                if row.get("associatedActivityId") is None:
+                    entries.append(coach_entry(row, day, plan))
+        candidates.append((summary, coach_plan_sport(plan, details), sports, published, entries))
+    return bool(plans), candidates, malformed
+
+
+def coach_workouts(garmin, request):
+    try:
+        start, end = (date.fromisoformat(request[key]) for key in ("startDate", "endDate"))
+    except (ValueError, KeyError, TypeError):
+        return {"status": "invalid_input"}
+    if start.isoformat() != request["startDate"] or end.isoformat() != request["endDate"] or (end - start).days != 6:
+        return {"status": "invalid_input"}
+
+    weeks, entries, candidates = [], [], []
+    plan_sports = {}
+    observed_plan = False
+    day = start
+    while day <= end:
+        monday = day - timedelta(days=day.weekday())
+        sunday = monday + timedelta(days=6)
+        coverage = {"weekStartDate": monday.isoformat(), "status": "empty", "plans": []}
+        weeks.append(coverage)
+        try:
+            has_plans, plans, malformed = coach_week(garmin, day, min(sunday, end))
+            observed_plan |= has_plans
+            if malformed:
+                coverage.update(status="empty" if plans else "error", error="coach_malformed_data")
+            candidates.append((coverage, plans))
+            for plan, sport, sports, _, _ in plans:
+                if "trainingPlanId" in plan:
+                    plan_types, workout_types = plan_sports.setdefault(plan["trainingPlanId"], (set(), set()))
+                    if sport is not None:
+                        plan_types.add(sport)
+                    workout_types.update(sports)
+        except Exception as error:
+            coverage.update(status="error", error=failure(error, "coach_read_failed")["status"])
+        day = sunday + timedelta(days=1)
+
+    # Weeks share the output budget. Reserve space for the response envelope.
+    weekly_budget = MAX_RESPONSE_BYTES // len(weeks) - 256
+    for coverage, plans in candidates:
+        week_entries = []
+        for plan, sport, sports, published, upcoming in plans:
+            plan_types, workout_types = plan_sports.get(plan.get("trainingPlanId"), (set(), sports))
+            inferred_running = not plan_types and "running" in workout_types and "other" not in workout_types
+            if sport == "running" or (sport is None and (plan_types == {"running"} or inferred_running)):
+                coverage["plans"].append(plan)
+                week_entries.extend(upcoming)
+                if published:
+                    coverage["status"] = "published"
+        if len(json.dumps([coverage, week_entries], ensure_ascii=False).encode("utf-8")) > weekly_budget:
+            coverage.update(status="error", error="workout_detail_limit", plans=[])
+        else:
+            entries.extend(week_entries)
+
+    if any("error" in coverage for coverage in weeks):
+        status = "coach_read_failed" if all(coverage["status"] == "error" for coverage in weeks) else "partial"
+    else:
+        status = "ok" if entries else "no_data"
+        if not observed_plan:
+            # An empty schedule can be unpublished. Check enrollment before reporting no active plan.
+            try:
+                if garmin.get_training_plans()["trainingPlanList"] == []:
+                    status = "no_active_plan"
+            except Exception:
+                pass
+    return {"status": status, "data": {"startDate": start.isoformat(), "endDate": end.isoformat(),
+                                       "weeks": weeks,
+                                       "entries": sorted(entries, key=lambda entry: entry["date"])}}
+
+
 def copy_step(step):
     content = selected_fields(step, (
         "type", "stepOrder", "stepType", "description", "endCondition", "endConditionValue",
@@ -545,6 +721,8 @@ def publish(garmin, request):
         return save_copy(garmin, build_strength_payload(request["workout"]), strength_shape, unique_name=True)
     if operation == "search":
         return search_workouts(garmin, request)
+    if operation == "coach_workouts":
+        return coach_workouts(garmin, request)
     if operation in {"get", "duplicate"}:
         current = library_workout(garmin, request["workoutId"])
         if current is None:
@@ -596,6 +774,6 @@ if __name__ == "__main__":
     except Exception as error:
         result = failure(error, "workout_service_unavailable")
     output = json.dumps(result, ensure_ascii=False)
-    if len(output.encode("utf-8")) > 65_536:
+    if len(output.encode("utf-8")) > MAX_RESPONSE_BYTES:
         output = '{"status":"workout_detail_limit"}'
     print(output)

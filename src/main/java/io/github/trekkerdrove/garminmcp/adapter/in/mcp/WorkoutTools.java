@@ -94,6 +94,14 @@ class WorkoutTools {
         return ToolResult.run(() -> workouts.get(workoutId));
     }
 
+    @McpTool(name = "garmin_get_coach_workouts",
+            description = "Read published Garmin Coach running-plan entries from today through six days from today in Europe/Paris. "
+                    + "Includes weekly coverage and explicit rest or race days. An absent date is unknown.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = true))
+    public ToolResult getCoachWorkouts() {
+        return ToolResult.run(workouts::getCoachWorkouts);
+    }
+
     @McpTool(name = "garmin_duplicate_workout",
             description = "Copy a saved library workout under a new name. Optionally adjust the lengths of distance-based steps. "
                     + "Show the proposed copy and obtain approval before confirming. Replaying a verified identical copy reuses its ID.",
