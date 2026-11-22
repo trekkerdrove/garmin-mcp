@@ -32,10 +32,6 @@ final class GarminConnectWorker {
         this.tokenDirectory = tokenDirectory.toAbsolutePath();
     }
 
-    JsonNode call(Map<String, Object> args, boolean courses, String failure) {
-        return call(args, courses, failure, Duration.ofSeconds(courses ? 60 : 45));
-    }
-
     JsonNode call(Map<String, Object> args, boolean courses, String failure, Duration timeout) {
         if (!Files.isRegularFile(tokenDirectory.resolve("garmin_tokens.json"))) {
             throw new GarminFailure(courses ? "course_account_unverified" : "workout_session_unavailable");

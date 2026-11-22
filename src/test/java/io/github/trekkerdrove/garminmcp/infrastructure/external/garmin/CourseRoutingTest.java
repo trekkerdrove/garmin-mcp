@@ -5,7 +5,9 @@ import io.github.trekkerdrove.garminmcp.application.port.out.ActivityReader;
 import io.github.trekkerdrove.garminmcp.application.port.out.CourseLibrary;
 import io.github.trekkerdrove.garminmcp.application.port.out.CourseRouter;
 import io.github.trekkerdrove.garminmcp.application.port.out.GarminArchive;
+import io.github.trekkerdrove.garminmcp.application.port.out.StrengthExerciseCatalog;
 import io.github.trekkerdrove.garminmcp.application.service.GarminConnectService;
+import io.github.trekkerdrove.garminmcp.application.service.StrengthWorkouts;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -92,6 +94,7 @@ class CourseRoutingTest {
         var config = new ApplicationContextRunner().withUserConfiguration(GarminConnectConfiguration.class,
                 CourseConfiguration.class, CourseFormats.class, reads, writes)
                 .withBean(ActivityReader.class, () -> mock(ActivityReader.class))
+                .withBean(StrengthExerciseCatalog.class, () -> mock(StrengthExerciseCatalog.class))
                 .withBean(GarminArchive.class, () -> (id, max) -> new byte[0]);
         config.withPropertyValues("garmin.courses.enabled=true", "garmin.workouts.enabled=true",
                         "garmin.workouts.python=/python", "garmin.workouts.script=/script",
@@ -103,6 +106,7 @@ class CourseRoutingTest {
                 .run(context -> assertThat(context).hasSingleBean(reads).doesNotHaveBean(writes));
         config.withPropertyValues("garmin.courses.routing.url=https://ors.test")
                 .run(context -> assertThat(context).hasSingleBean(CourseRouter.class)
+                        .hasSingleBean(StrengthWorkouts.class)
                         .doesNotHaveBean(GarminConnectWorker.class).doesNotHaveBean(CourseLibrary.class));
     }
 }

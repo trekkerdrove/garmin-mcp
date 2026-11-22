@@ -4,6 +4,7 @@ import java.util.List;
 import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
 import io.github.trekkerdrove.garminmcp.application.service.GarminConnectService;
+import io.github.trekkerdrove.garminmcp.application.service.StrengthWorkouts;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -17,8 +18,28 @@ class WorkoutTools {
             + "4:25–4:35/km is {fast:265,slow:275}. For a single pace use equal bounds.";
     private final GarminConnectService workouts;
 
-    WorkoutTools(GarminConnectService workouts) {
+    private final StrengthWorkouts strength;
+
+    WorkoutTools(GarminConnectService workouts, StrengthWorkouts strength) {
         this.workouts = workouts;
+        this.strength = strength;
+    }
+
+    @McpTool(name = "garmin_create_strength_workout",
+            description = "Preview or save a structured strength workout. Use keys from garmin_search_strength_exercises. "
+                    + "Show the effective sets and rests and obtain approval before setting confirm=true. "
+                    + "An identical workout with the same name is reused. A different workout with that name is left intact.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = false, destructiveHint = false, idempotentHint = false))
+    public ToolResult createStrength(
+            @McpToolParam(description = "Workout name, up to 120 characters.") String name,
+            @McpToolParam(description = "Ordered blocks, at most 50 effective steps including rests. Each block needs category, "
+                    + "exerciseName, sets and exactly one of reps or durationSeconds. Optional weightKg is the external load "
+                    + "in kg, at most 453.5 with up to 3 decimal places. Clarify total versus per-dumbbell if ambiguous. "
+                    + "Optional restBetweenSetsSeconds only runs between sets of this block. Optional restAfterBlockSeconds "
+                    + "runs before the next block and must be omitted or zero in the last block. Both default to zero. "
+                    + "Repeat the exercise in another block to vary the load, reps or duration.") List<StrengthWorkouts.Block> exercises,
+            @McpToolParam(required = false, description = "Default false. Set true only after approval.") Boolean confirm) {
+        return ToolResult.run(() -> strength.create(name, exercises, Boolean.TRUE.equals(confirm), workouts));
     }
 
     @McpTool(name = "garmin_create_workout",
@@ -71,6 +92,14 @@ class WorkoutTools {
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = true))
     public ToolResult get(@McpToolParam(description = "Garmin library workout ID from garmin_search_workouts.") long workoutId) {
         return ToolResult.run(() -> workouts.get(workoutId));
+    }
+
+    @McpTool(name = "garmin_get_coach_workouts",
+            description = "Read published Garmin Coach running-plan entries from today through six days from today in Europe/Paris. "
+                    + "Includes weekly coverage and explicit rest or race days. An absent date is unknown.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = true))
+    public ToolResult getCoachWorkouts() {
+        return ToolResult.run(workouts::getCoachWorkouts);
     }
 
     @McpTool(name = "garmin_duplicate_workout",
