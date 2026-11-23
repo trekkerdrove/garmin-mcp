@@ -96,10 +96,25 @@ class WorkoutTools {
 
     @McpTool(name = "garmin_get_coach_workouts",
             description = "Read published Garmin Coach running-plan entries from today through six days from today in Europe/Paris. "
-                    + "Includes weekly coverage and explicit rest or race days. An absent date is unknown.",
+                    + "For today, select entries dated startDate. Includes weekly coverage and explicit rest or race days. "
+                    + "An absent date is unknown. To see the steps of one selected workout, pass its workoutUuid to "
+                    + "garmin_get_coach_workout_details. If several workouts match, ask which to detail. "
+                    + "For rest days, entries without a usable UUID, or a weekly overview, use the schedule alone.",
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = true))
     public ToolResult getCoachWorkouts() {
         return ToolResult.run(workouts::getCoachWorkouts);
+    }
+
+    @McpTool(name = "garmin_get_coach_workout_details",
+            description = "Read the steps, repeat groups, and available targets of one workout selected from "
+                    + "garmin_get_coach_workouts. Reuse its workoutUuid for follow-up questions. "
+                    + "Keep the schedule summary when steps are unavailable: no_data means Garmin published none, "
+                    + "coach_workout_not_found means the workout is missing, and coach_read_failed means the read or verification failed.",
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = true))
+    public ToolResult getCoachWorkoutDetails(
+            @McpToolParam(description = "Text UUID with 36 characters and hyphens from the selected Coach entry's workoutUuid.") Object workoutUuid) {
+        // Validate the JSON value in the handler so malformed input returns a ToolResult.
+        return ToolResult.run(() -> workouts.getCoachWorkoutDetails(workoutUuid instanceof String uuid ? uuid : null));
     }
 
     @McpTool(name = "garmin_duplicate_workout",

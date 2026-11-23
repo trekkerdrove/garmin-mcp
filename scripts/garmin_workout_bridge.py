@@ -7,6 +7,8 @@ import logging
 import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from fractions import Fraction
+from math import isfinite
 from pathlib import Path
 import re
 import runpy
@@ -23,6 +25,7 @@ from requests.exceptions import ConnectTimeout
 SPORTS = {"running": 1, "walking": 12, "cycling": 2}
 KINDS = {"warmup": 1, "cooldown": 2, "interval": 3, "recovery": 4}
 MAX_RESPONSE_BYTES = 65_536
+COACH_UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 DEVICE_OPERATIONS = {"list_devices", "send_to_device"}
 # Garmin computes BMI for a manual weight, even without any scale data.
 COMPOSITION_FIELDS = ("bodyFat", "bodyWater", "boneMass", "muscleMass", "physiqueRating",
@@ -413,7 +416,7 @@ def coach_week(garmin, first, last):
     return bool(plans), candidates, malformed
 
 
-def coach_workouts(garmin, request):
+def coach_workouts(garmin, request, *, verify_membership=False):
     try:
         start, end = (date.fromisoformat(request[key]) for key in ("startDate", "endDate"))
     except (ValueError, KeyError, TypeError):
@@ -472,23 +475,204 @@ def coach_workouts(garmin, request):
             try:
                 if garmin.get_training_plans()["trainingPlanList"] == []:
                     status = "no_active_plan"
-            except Exception:
-                pass
+            except Exception as error:
+                if verify_membership:
+                    return failure(error, "coach_read_failed")
     return {"status": status, "data": {"startDate": start.isoformat(), "endDate": end.isoformat(),
                                        "weeks": weeks,
                                        "entries": sorted(entries, key=lambda entry: entry["date"])}}
 
 
+WORKOUT_STEP_FIELDS = (
+    "type", "stepOrder", "stepType", "description", "endCondition", "endConditionValue",
+    "endConditionCompare", "endConditionZone", "preferredEndConditionUnit",
+    "targetType", "targetValueOne", "targetValueTwo", "targetValueUnit", "zoneNumber",
+    "secondaryTargetType", "secondaryTargetValueOne", "secondaryTargetValueTwo",
+    "secondaryTargetValueUnit", "secondaryZoneNumber", "numberOfIterations", "skipLastRestStep",
+)
+UNIT_FIELDS = ("unitKey", "unitId", "factor")
+SPORT_FIELDS = ("sportTypeKey", "sportTypeId")
+COACH_STEP_METADATA = {
+    "stepType": ("stepTypeKey", "stepTypeId"),
+    "endCondition": ("conditionTypeKey", "conditionTypeId"),
+    "preferredEndConditionUnit": UNIT_FIELDS,
+    "endConditionValueUnit": UNIT_FIELDS,
+    "targetType": ("workoutTargetTypeKey", "workoutTargetTypeId"),
+    "targetValueUnit": UNIT_FIELDS,
+    "secondaryTargetType": ("workoutTargetTypeKey", "workoutTargetTypeId"),
+    "secondaryTargetValueUnit": UNIT_FIELDS,
+}
+SPEED_UNITS = {"m/s", "mps", "meter_per_second", "meters_per_second", "metre_per_second", "metres_per_second"}
+
+
+def canonical_coach_uuid(value):
+    return value.lower() if isinstance(value, str) and COACH_UUID.fullmatch(value) else None
+
+
+def detail_number(value):
+    return type(value) is int or (type(value) is float and isfinite(value))
+
+
+def detail_fields(data, names, metadata=None):
+    content = {}
+    for key in names:
+        value = data.get(key)
+        if key == "skipLastRestStep":
+            if type(value) is bool:
+                content[key] = value
+        elif detail_number(value) or isinstance(value, str):
+            content[key] = value
+        elif isinstance(value, dict) and metadata and key in metadata:
+            fields = detail_fields(value, metadata[key])
+            if fields:
+                content[key] = fields
+    return content
+
+
+def ordered_coach_items(items, order_key):
+    if items is None:
+        return []
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        raise ValueError("Invalid Garmin Coach structure")
+    orders = [item.get(order_key) for item in items]
+    if all(type(order) is int for order in orders) and len(set(orders)) == len(orders):
+        return sorted(items, key=lambda item: item[order_key])
+    return items
+
+
+def coach_pace(target_type, unit, first_speed, second_speed):
+    key = target_type.get("workoutTargetTypeKey") if isinstance(target_type, dict) else target_type
+    unit_key = unit.get("unitKey") if isinstance(unit, dict) else unit
+    if key != "pace.zone" or (unit is not None
+            and (not isinstance(unit_key, str) or unit_key.lower() not in SPEED_UNITS)):
+        return None
+    speeds = (first_speed, second_speed)
+    if not all(detail_number(speed) and speed > 0 for speed in speeds):
+        return None
+    # Garmin's adaptive pace.zone speeds default to m/s when no unit is provided.
+    paces = [int(Fraction(1000) / Fraction(str(speed)) + Fraction(1, 2)) for speed in speeds]
+    return {"fast": min(paces), "slow": max(paces)}
+
+
+def usable_step_type(value, key, identifier):
+    if isinstance(value, dict):
+        type_id = value.get(identifier)
+        if type(type_id) is int and type_id > 0:
+            return True
+        value = value.get(key)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def coach_step(step):
+    if "numberOfIterations" in step:
+        iterations = step["numberOfIterations"]
+        if type(iterations) is not int or iterations <= 0:
+            raise ValueError("Invalid Garmin Coach repeat count")
+    fields = (*WORKOUT_STEP_FIELDS, "endConditionValueUnit")
+    content = detail_fields(step, fields, COACH_STEP_METADATA)
+    for target, unit, first, second, pace in (
+        ("targetType", "targetValueUnit", "targetValueOne", "targetValueTwo", "paceSecondsPerKm"),
+        ("secondaryTargetType", "secondaryTargetValueUnit", "secondaryTargetValueOne",
+         "secondaryTargetValueTwo", "secondaryPaceSecondsPerKm"),
+    ):
+        bounds = coach_pace(step.get(target), step.get(unit), step.get(first), step.get(second))
+        if bounds is not None:
+            content[pace] = bounds
+    if "workoutSteps" in step:
+        content["workoutSteps"] = [coach_step(child) for child in ordered_coach_items(step["workoutSteps"], "stepOrder")]
+    step_type = content.get("stepType")
+    step_key = step_type.get("stepTypeKey") if isinstance(step_type, dict) else step_type
+    is_repeat = content.get("type") == "RepeatGroupDTO" or "numberOfIterations" in content or step_key == "repeat"
+    if is_repeat and not content.get("workoutSteps"):
+        raise ValueError("Invalid Garmin Coach repeat group")
+    description = content.get("description")
+    if not (content.get("workoutSteps") or (isinstance(description, str) and description.strip())
+            or any(usable_step_type(content.get(field), *COACH_STEP_METADATA[field])
+                   for field in ("stepType", "endCondition", "targetType", "secondaryTargetType"))):
+        raise ValueError("Invalid Garmin Coach step")
+    return content
+
+
+def incompatible_coach_sport(data):
+    return any(coach_sport(data.get(field)) in {"other", "supplemental"} for field in ("sportType", "sport"))
+
+
+def coach_segment(segment):
+    if incompatible_coach_sport(segment):
+        raise ValueError("Unexpected Garmin Coach segment sport")
+    content = detail_fields(segment, ("segmentOrder", "sportType"), {"sportType": SPORT_FIELDS})
+    if not content and "workoutSteps" not in segment:
+        raise ValueError("Invalid Garmin Coach segment")
+    steps = ordered_coach_items(segment.get("workoutSteps"), "stepOrder")
+    return {**content, "workoutSteps": [coach_step(step) for step in steps]}
+
+
+def coach_detail_summary(workout):
+    summary = {}
+    for key, value in (("name", workout.get("workoutName")), ("sport", coach_sport_key(workout.get("sportType"))),
+                       ("workoutType", workout.get("workoutPhrase"))):
+        if isinstance(value, str) and value.strip():
+            summary[key] = value
+    for key, sources in (("estimatedDurationSeconds", ("estimatedDurationInSecs", "estimatedDuration")),
+                         ("estimatedDistanceMeters", ("estimatedDistanceInMeters", "estimatedDistance"))):
+        for source in sources:
+            if detail_number(workout.get(source)):
+                summary[key] = workout[source]
+                break
+    return summary
+
+
+def coach_workout_details(garmin, request, workout_uuid):
+    schedule = coach_workouts(garmin, request, verify_membership=True)
+    if "data" not in schedule:
+        return schedule
+    entries = schedule["data"]["entries"]
+    matching = [entry for entry in entries if canonical_coach_uuid(entry.get("workoutUuid")) == workout_uuid]
+    selected = next((entry for entry in matching if entry.get("isRestDay") is not True), None)
+    if selected is None:
+        weeks = schedule["data"]["weeks"]
+        errors = [week["error"] for week in weeks if "error" in week]
+        if errors:
+            shared = next((error for error in errors if error not in {"coach_read_failed", "coach_malformed_data"}),
+                          "coach_read_failed")
+            return {"status": shared}
+        if schedule["status"] == "no_active_plan":
+            return {"status": "coach_workout_not_found"}
+        # A published plan cannot establish coverage for another plan.
+        plan_ids = {plan.get("trainingPlanId") for week in weeks for plan in week["plans"]}
+        if len(plan_ids) != 1 or None in plan_ids or any(len(week["plans"]) != 1 for week in weeks):
+            return {"status": "coach_read_failed"}
+        complete = len({entry["date"] for entry in entries}) == 7 and all(
+            entry.get("isRestDay") is True or canonical_coach_uuid(entry.get("workoutUuid")) for entry in entries)
+        return {"status": "coach_workout_not_found" if matching or complete else "coach_read_failed"}
+
+    try:
+        workout = garmin.connectapi(f"workout-service/fbt-adaptive/{workout_uuid}")
+    except Exception as error:
+        if http_status(error) == 404:
+            return {"status": "coach_workout_not_found"}
+        return failure(error, "coach_read_failed")
+    if not isinstance(workout, dict) or incompatible_coach_sport(workout):
+        return {"status": "coach_read_failed"}
+    if "workoutUuid" in workout and canonical_coach_uuid(workout["workoutUuid"]) != workout_uuid:
+        return {"status": "coach_read_failed"}
+    summary = coach_detail_summary(workout)
+    try:
+        segments = [coach_segment(segment) for segment in ordered_coach_items(workout.get("workoutSegments"), "segmentOrder")]
+    except (ValueError, RecursionError):
+        return {"status": "coach_read_failed"}
+    has_steps = any(segment["workoutSteps"] for segment in segments)
+    if not has_steps and "workoutUuid" not in workout and not (summary.get("name") or summary.get("workoutType")):
+        return {"status": "coach_read_failed"}
+    summary_fields = ("name", "sport", "workoutType", "estimatedDurationSeconds", "estimatedDistanceMeters")
+    return {"status": "ok" if has_steps else "no_data",
+            "data": {**detail_fields(selected, summary_fields), **summary, "workoutUuid": workout_uuid,
+                     "workout": {"workoutSegments": segments if has_steps else []}}}
+
+
 def copy_step(step):
-    content = selected_fields(step, (
-        "type", "stepOrder", "stepType", "description", "endCondition", "endConditionValue",
-        "endConditionCompare", "endConditionZone", "preferredEndConditionUnit",
-        "targetType", "targetValueOne", "targetValueTwo", "targetValueUnit", "zoneNumber",
-        "secondaryTargetType", "secondaryTargetValueOne", "secondaryTargetValueTwo",
-        "secondaryTargetValueUnit", "secondaryZoneNumber", "strokeType", "equipmentType",
-        "drillType", "category", "exerciseName", "weightValue", "weightUnit", "numberOfIterations",
-        "skipLastRestStep",
-    ))
+    content = selected_fields(step, (*WORKOUT_STEP_FIELDS, "strokeType", "equipmentType", "drillType",
+                                     "category", "exerciseName", "weightValue", "weightUnit"))
     if "workoutSteps" in step:
         content["workoutSteps"] = [copy_step(child) for child in step["workoutSteps"] or []]
     return content
@@ -849,9 +1033,19 @@ def device_operation(garmin, request, course_bridge=None):
 
 
 def publish(garmin, request):
-    if not account_verified(garmin, request["expectedActivityId"]):
-        return {"status": "workout_account_unverified"}
     operation = request["operation"]
+    if operation == "coach_workout_details":
+        workout_uuid = canonical_coach_uuid(request.get("workoutUuid"))
+        if workout_uuid is None:
+            return {"status": "invalid_input"}
+    try:
+        verified = account_verified(garmin, request["expectedActivityId"])
+    except Exception as error:
+        if operation == "coach_workout_details":
+            return failure(error, "coach_read_failed")
+        raise
+    if not verified:
+        return {"status": "workout_account_unverified"}
     if operation == "set_weight":
         return set_weight(garmin, request)
     if operation == "create":
@@ -862,6 +1056,8 @@ def publish(garmin, request):
         return search_workouts(garmin, request)
     if operation == "coach_workouts":
         return coach_workouts(garmin, request)
+    if operation == "coach_workout_details":
+        return coach_workout_details(garmin, request, workout_uuid)
     if operation in {"get", "duplicate"}:
         current = library_workout(garmin, request["workoutId"])
         if current is None:
@@ -959,6 +1155,17 @@ def save_session(token_file, refreshed):
         Path(temporary.name).unlink(missing_ok=True)
 
 
+def bounded_output(result, courses):
+    output = json.dumps(result, ensure_ascii=False)
+    export = courses and isinstance(result.get("data"), dict) and "contentBase64" in result["data"]
+    limit = 8 * 1024 * 1024 if courses else MAX_RESPONSE_BYTES
+    if export:
+        limit = 4 * ((limit + 2) // 3) + 1024
+    if len(output.encode("utf-8")) > limit:
+        return '{"status":"course_response_too_large"}' if courses else '{"status":"workout_detail_limit"}'
+    return output
+
+
 if __name__ == "__main__":
     os.umask(0o077)
     logging.disable(logging.CRITICAL)
@@ -969,11 +1176,4 @@ if __name__ == "__main__":
         result = {"status": "workout_library_limit"}
     except Exception as error:
         result = failure(error, "garmin_unavailable" if courses else "workout_service_unavailable")
-    output = json.dumps(result, ensure_ascii=False)
-    export = courses and isinstance(result.get("data"), dict) and "contentBase64" in result["data"]
-    limit = 8 * 1024 * 1024 if courses else MAX_RESPONSE_BYTES
-    if export:
-        limit = 4 * ((limit + 2) // 3) + 1024
-    if len(output.encode("utf-8")) > limit:
-        output = '{"status":"course_response_too_large"}' if courses else '{"status":"workout_detail_limit"}'
-    print(output)
+    print(bounded_output(result, courses))

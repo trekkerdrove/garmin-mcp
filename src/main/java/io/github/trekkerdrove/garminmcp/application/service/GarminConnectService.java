@@ -9,6 +9,7 @@ import java.time.ZoneId;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.Semaphore;
 import io.github.trekkerdrove.garminmcp.application.dto.GarminFailure;
@@ -69,8 +70,21 @@ public final class GarminConnectService {
     }
 
     public ToolResult getCoachWorkouts() {
+        return run(Operation.coach_workouts, coachDates());
+    }
+
+    public ToolResult getCoachWorkoutDetails(String workoutUuid) {
+        if (workoutUuid == null || !workoutUuid.matches("[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")) {
+            throw new IllegalArgumentException("Invalid workout UUID");
+        }
+        var args = new HashMap<>(coachDates());
+        args.put("workoutUuid", workoutUuid.toLowerCase(Locale.ROOT));
+        return run(Operation.coach_workout_details, args);
+    }
+
+    private Map<String, Object> coachDates() {
         var today = LocalDate.now(clock.withZone(PARIS));
-        return run(Operation.coach_workouts, Map.of("startDate", today.toString(), "endDate", today.plusDays(6).toString()));
+        return Map.of("startDate", today.toString(), "endDate", today.plusDays(6).toString());
     }
 
     public ToolResult duplicate(long workoutId, String name, List<WorkoutDraft.DistanceChange> changes, boolean confirm) {

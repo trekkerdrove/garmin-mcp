@@ -9,6 +9,7 @@ import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
 import io.github.trekkerdrove.garminmcp.application.dto.ToolResult;
 import io.github.trekkerdrove.garminmcp.application.port.out.GarminConnectPort;
 import io.github.trekkerdrove.garminmcp.application.service.StrengthWorkouts;
+import tools.jackson.databind.JsonNode;
 
 final class PythonGarminConnect implements GarminConnectPort {
     private static final Set<String> FAILURES = Set.of("workout_account_unverified", "workout_name_conflict",
@@ -24,15 +25,23 @@ final class PythonGarminConnect implements GarminConnectPort {
 
     @Override
     public ToolResult publish(Operation operation, Map<String, Object> args, long expectedActivityId) {
-        String failure = operation == Operation.search || operation == Operation.get
-                || operation == Operation.coach_workouts || Boolean.FALSE.equals(args.get("confirm"))
-                ? "workout_service_unavailable"
-                : operation == Operation.set_weight ? "weight_write_unconfirmed" : "workout_write_unconfirmed";
+        boolean coachDetails = operation == Operation.coach_workout_details;
+        String failure = switch (operation) {
+            case coach_workout_details -> "coach_read_failed";
+            case search, get, coach_workouts -> "workout_service_unavailable";
+            default -> Boolean.FALSE.equals(args.get("confirm")) ? "workout_service_unavailable"
+                    : operation == Operation.set_weight ? "weight_write_unconfirmed" : "workout_write_unconfirmed";
+        };
         var request = new HashMap<>(args);
         request.put("operation", operation);
         request.put("expectedActivityId", expectedActivityId);
-        // Coach can use four requests plus a session refresh.
-        var reply = worker.call(request, false, failure, Duration.ofSeconds(operation == Operation.coach_workouts ? 95 : 45));
+        // Allow for account verification, two schedule weeks, the detail request, and a refresh with retry.
+        var timeout = Duration.ofSeconds(switch (operation) {
+            case coach_workout_details -> 120;
+            case coach_workouts -> 95;
+            default -> 45;
+        });
+        var reply = worker.call(request, false, failure, timeout);
         var status = reply.path("status").asString("");
         var data = reply.path("data");
         if (data.isObject() && switch (operation) {
@@ -42,6 +51,15 @@ final class PythonGarminConnect implements GarminConnectPort {
                     && args.get("startDate").equals(data.path("startDate").asString())
                     && args.get("endDate").equals(data.path("endDate").asString())
                     && data.path("weeks").isArray() && data.path("entries").isArray();
+            case coach_workout_details -> {
+                var segments = data.path("workout").path("workoutSegments");
+                yield args.get("workoutUuid").equals(data.path("workoutUuid").asString()) && segments.isArray()
+                        && (status.equals("no_data") && segments.isEmpty()
+                            || status.equals("ok") && segments.valueStream().anyMatch(segment -> {
+                                var steps = segment.path("workoutSteps");
+                                return steps.isArray() && steps.valueStream().anyMatch(JsonNode::isObject);
+                            }));
+            }
             case duplicate -> data.path("sourceWorkoutId").asLong() == (long) args.get("workoutId")
                     && (Boolean.TRUE.equals(args.get("confirm"))
                         ? (status.equals("created") || status.equals("already_exists"))
@@ -80,6 +98,7 @@ final class PythonGarminConnect implements GarminConnectPort {
                 return new ToolResult(status, details);
             }
         }
-        throw new GarminFailure(FAILURES.contains(status) ? status : failure);
+        throw new GarminFailure(FAILURES.contains(status) || coachDetails && status.equals("coach_workout_not_found")
+                ? status : failure);
     }
 }

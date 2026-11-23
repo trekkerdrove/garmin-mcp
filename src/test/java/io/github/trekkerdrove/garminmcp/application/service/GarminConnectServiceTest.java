@@ -6,6 +6,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import io.github.trekkerdrove.garminmcp.application.dto.GarminFailure;
 import io.github.trekkerdrove.garminmcp.application.dto.WorkoutDraft;
@@ -43,6 +44,27 @@ class GarminConnectServiceTest {
         when(publisher.publish(Operation.coach_workouts,
                 Map.of("startDate", "2026-03-30", "endDate", "2026-04-05"), 42)).thenReturn(result);
         assertThat(service.getCoachWorkouts()).isEqualTo(result);
+    }
+
+    @Test
+    void coachDetailUsesTheSameParisWindowAndCanonicalUuid() {
+        var activity = new ActivityReader.Activity(42, null, LocalDate.of(2026, 3, 29), "running",
+                Map.of(), Map.of(), Map.of(), new ActivityReader.Selection(List.of(), false), Map.of(), Map.of());
+        when(activities.search(Map.of(), 0, 1, SearchView.SUMMARY)).thenReturn(List.of(activity));
+        String uuid = "123e4567-e89b-42d3-a456-426614174000";
+        var result = ToolResult.ok(Map.of("workoutUuid", uuid));
+        when(publisher.publish(Operation.coach_workout_details,
+                Map.of("startDate", "2026-03-30", "endDate", "2026-04-05", "workoutUuid", uuid), 42)).thenReturn(result);
+        assertThat(service.getCoachWorkoutDetails(uuid.toUpperCase(Locale.ROOT))).isEqualTo(result);
+    }
+
+    @Test
+    void coachDetailRejectsInvalidUuidBeforeContactingEitherGarminApi() {
+        for (String invalid : new String[]{null, "", "123", "1-1-1-1-1", "123e4567-e89b-42d3-a456-426614174000\n"}) {
+            assertThat(ToolResult.run(() -> service.getCoachWorkoutDetails(invalid)))
+                    .isEqualTo(new ToolResult("invalid_input", null));
+        }
+        verifyNoInteractions(activities, publisher);
     }
 
     @Test

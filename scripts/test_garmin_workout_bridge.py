@@ -1,8 +1,10 @@
+import json
 import unittest
 from copy import deepcopy
 from unittest.mock import Mock, call
 
-from garmin_workout_bridge import GarminConnectConnectionError, build_payload, build_strength_payload, publish, strength_shape
+from garmin_workout_bridge import (GarminConnectConnectionError, bounded_output, build_payload, build_strength_payload,
+                                   publish, strength_shape)
 
 
 class WorkoutBridgeTest(unittest.TestCase):
@@ -187,6 +189,8 @@ class WorkoutBridgeTest(unittest.TestCase):
 
 
 class CoachBridgeTest(unittest.TestCase):
+    UUID = "123e4567-e89b-42d3-a456-426614174000"
+
     def setUp(self):
         self.garmin = Mock()
         self.garmin.get_activities.return_value = [{"activityId": 7}]
@@ -194,6 +198,15 @@ class CoachBridgeTest(unittest.TestCase):
     def invoke(self, start="2026-11-22", end="2026-11-28"):
         return publish(self.garmin, {"operation": "coach_workouts", "expectedActivityId": 7,
                                      "startDate": start, "endDate": end})
+
+    def details(self, uuid=UUID, start="2026-11-23", end="2026-11-29"):
+        return publish(self.garmin, {"operation": "coach_workout_details", "expectedActivityId": 7,
+                                     "startDate": start, "endDate": end, "workoutUuid": uuid})
+
+    def threshold(self, **overrides):
+        return {"scheduleDate": "2026-11-23", "workoutName": "Seuil", "workoutType": "running",
+                "workoutPhrase": "LACTATE_THRESHOLD", "estimatedDurationInSecs": 2580,
+                "workoutUuid": self.UUID, **overrides}
 
     @staticmethod
     def plan(rows, **overrides):
@@ -341,6 +354,206 @@ class CoachBridgeTest(unittest.TestCase):
         self.assertEqual(self.invoke(end="2026-12-01"), {"status": "invalid_input"})
         self.assertEqual(self.invoke(start="20261122"), {"status": "invalid_input"})
         self.garmin.query_garmin_graphql.assert_not_called()
+
+    def test_reads_the_selected_threshold_workout_without_library_or_write_calls(self):
+        self.garmin.query_garmin_graphql.return_value = self.result(self.plan([self.threshold(workoutUuid=self.UUID.upper())]))
+        steps = build_payload({"name": "Seuil", "sport": "running", "steps": [
+            {"kind": "warmup", "durationSeconds": 600}, {"kind": "interval", "durationSeconds": 300},
+            {"kind": "recovery", "durationSeconds": 120}, {"kind": "cooldown", "durationSeconds": 300},
+        ]})["workoutSegments"][0]["workoutSteps"]
+        warmup, effort, recovery, cooldown = steps
+        effort.update(targetType={"workoutTargetTypeKey": "pace.zone", "ownerId": "excluded"},
+                      targetValueOne=3.5, targetValueTwo=4, stepId=123)
+        cooldown["stepOrder"] = 5
+        repeat = {"type": "RepeatGroupDTO", "stepType": {"stepTypeKey": "repeat"}, "stepOrder": 2,
+                  "numberOfIterations": 4, "skipLastRestStep": False, "workoutSteps": [recovery, effort]}
+        self.garmin.connectapi.return_value = {
+            "workoutUuid": self.UUID.upper(), "ownerId": 1, "author": {"name": "excluded"},
+            "workoutSegments": [{"segmentOrder": 1, "sportType": {"sportTypeKey": "running", "ownerId": 1},
+                                 "workoutSteps": [cooldown, repeat, warmup]}],
+        }
+
+        schedule = self.invoke("2026-11-23", "2026-11-29")["data"]
+        selected, = (entry for entry in schedule["entries"] if entry["date"] == schedule["startDate"])
+        result = self.details(selected["workoutUuid"])
+
+        self.assertEqual(result["status"], "ok")
+        data = result["data"]
+        self.assertEqual({key: value for key, value in data.items() if key != "workout"}, {
+            "workoutUuid": self.UUID, "name": "Seuil", "sport": "running", "workoutType": "LACTATE_THRESHOLD",
+            "estimatedDurationSeconds": 2580,
+        })
+        segment, = data["workout"]["workoutSegments"]
+        self.assertEqual(segment["sportType"], {"sportTypeKey": "running"})
+        first, group, last = segment["workoutSteps"]
+        self.assertEqual([step["stepType"]["stepTypeKey"] for step in (first, group, last)],
+                         ["warmup", "repeat", "cooldown"])
+        self.assertEqual([first["endConditionValue"], last["endConditionValue"]], [600, 300])
+        self.assertEqual(group["numberOfIterations"], 4)
+        self.assertIs(group["skipLastRestStep"], False)
+        projected_effort, projected_recovery = group["workoutSteps"]
+        self.assertEqual([projected_effort["endConditionValue"], projected_recovery["endConditionValue"]], [300, 120])
+        self.assertEqual(projected_effort["paceSecondsPerKm"], {"fast": 250, "slow": 286})
+        self.assertEqual(projected_recovery["targetType"]["workoutTargetTypeKey"], "no.target")
+        self.assertNotIn("ownerId", json.dumps(data))
+        self.assertNotIn("author", json.dumps(data))
+        self.assertNotIn("stepId", json.dumps(data))
+        self.assertEqual([method for method, _, _ in self.garmin.mock_calls],
+                         ["get_activities", "query_garmin_graphql", "get_activities", "query_garmin_graphql", "connectapi"])
+        self.garmin.connectapi.assert_called_once_with(f"workout-service/fbt-adaptive/{self.UUID}")
+
+    def test_preserves_nested_steps_conditions_and_ambiguous_units(self):
+        self.garmin.query_garmin_graphql.return_value = self.result(self.plan([self.threshold()]))
+        distance = {"stepOrder": 8, "stepType": {"stepTypeKey": "future.step"},
+                    "endCondition": {"conditionTypeKey": "distance"}, "endConditionValue": 400,
+                    "preferredEndConditionUnit": {"unitKey": "meter"},
+                    "targetType": {"workoutTargetTypeKey": "heart.rate.zone"}, "zoneNumber": 3,
+                    "secondaryTargetType": {"workoutTargetTypeKey": "pace.zone"},
+                    "secondaryTargetValueOne": 16, "secondaryTargetValueTwo": 16,
+                    "secondaryTargetValueUnit": {"unitKey": "m/s"}}
+        manual = {"stepOrder": 8, "endCondition": {"conditionTypeKey": "lap.button"},
+                  "description": "Press Lap when ready", "targetType": {"workoutTargetTypeKey": "pace.zone"},
+                  "targetValueOne": 3.5, "targetValueTwo": 4, "targetValueUnit": {"unitKey": "unknown"}}
+        inner = {"stepOrder": 5, "numberOfIterations": 2, "workoutSteps": [manual, distance]}
+        outer = {"stepOrder": 1, "numberOfIterations": 3, "workoutSteps": [inner]}
+        pace = {"stepOrder": 1.5, "targetType": {"workoutTargetTypeKey": "pace.zone"},
+                "targetValueOne": 4, "targetValueTwo": 3.5, "targetValueUnit": {"unitKey": "meters_per_second"}}
+        missing_bound = {"stepOrder": 0, "targetType": {"workoutTargetTypeKey": "pace.zone"}, "targetValueOne": 4}
+        nonpositive = {**missing_bound, "targetValueTwo": 0}
+        self.garmin.connectapi.return_value = {"workoutSegments": [
+            {"segmentOrder": 2, "workoutSteps": [outer]}, {"segmentOrder": 1, "workoutSteps": [pace, missing_bound, nonpositive]},
+        ]}
+
+        first, second = self.details()["data"]["workout"]["workoutSegments"]
+        self.assertEqual([first["segmentOrder"], second["segmentOrder"]], [1, 2])
+        self.assertEqual(first["workoutSteps"][0]["paceSecondsPerKm"], {"fast": 250, "slow": 286})
+        for step in first["workoutSteps"][1:]:
+            self.assertNotIn("paceSecondsPerKm", step)
+        manual_detail, distance_detail = second["workoutSteps"][0]["workoutSteps"][0]["workoutSteps"]
+        self.assertEqual(manual_detail, manual)
+        self.assertEqual(distance_detail, {**distance, "secondaryPaceSecondsPerKm": {"fast": 63, "slow": 63}})
+
+    def test_rejects_invalid_uuid_wrong_account_and_explicit_rest_before_detail(self):
+        for invalid in (None, "", 42, "42", "1-1-1-1-1", " " + self.UUID, self.UUID + "\n"):
+            with self.subTest(uuid=invalid):
+                self.assertEqual(self.details(invalid), {"status": "invalid_input"})
+        self.garmin.get_activities.assert_not_called()
+        self.garmin.get_activities.return_value = [{"activityId": 8}]
+        self.assertEqual(self.details(), {"status": "workout_account_unverified"})
+        self.garmin.query_garmin_graphql.assert_not_called()
+        self.garmin.get_activities.return_value = [{"activityId": 7}]
+        self.garmin.query_garmin_graphql.return_value = self.result(self.plan([self.threshold(isRestDay=True)]))
+        self.assertEqual(self.details(), {"status": "coach_workout_not_found"})
+        self.garmin.connectapi.assert_not_called()
+
+    def test_requires_membership_and_reports_unreadable_or_unpublished_schedule(self):
+        wrong_uuid = "123e4567-e89b-42d3-a456-426614174001"
+        schedule = self.result(self.plan([self.threshold(workoutUuid=wrong_uuid)]))
+        self.garmin.query_garmin_graphql.side_effect = [
+            TimeoutError("excluded"), schedule, GarminConnectConnectionError("API Error 403"), schedule,
+        ]
+        self.assertEqual(self.details(start="2026-11-22", end="2026-11-28"), {"status": "coach_read_failed"})
+        self.assertEqual(self.details(start="2026-11-22", end="2026-11-28"), {"status": "garmin_access_denied"})
+        self.garmin.query_garmin_graphql.side_effect = None
+        self.garmin.query_garmin_graphql.return_value = schedule
+        self.assertEqual(self.details(), {"status": "coach_read_failed"})
+        complete_rows = [self.threshold(scheduleDate=f"2026-11-{day}", workoutUuid=wrong_uuid) for day in range(23, 30)]
+        self.garmin.query_garmin_graphql.return_value = self.result(self.plan(complete_rows))
+        self.assertEqual(self.details(), {"status": "coach_workout_not_found"})
+        complete_rows[0].pop("workoutUuid")
+        self.assertEqual(self.details(), {"status": "coach_read_failed"})
+        self.garmin.query_garmin_graphql.return_value = self.result()
+        self.garmin.get_training_plans.return_value = {"trainingPlanList": []}
+        self.assertEqual(self.details(), {"status": "coach_workout_not_found"})
+        self.garmin.get_training_plans.side_effect = GarminConnectConnectionError("API Error 429")
+        self.assertEqual(self.details(), {"status": "garmin_rate_limited"})
+        self.garmin.connectapi.assert_not_called()
+
+    def test_accepts_matching_entry_when_another_week_fails_and_keeps_summary_without_steps(self):
+        self.garmin.query_garmin_graphql.side_effect = [
+            TimeoutError("excluded"), self.result(self.plan([self.threshold()])),
+        ]
+        self.garmin.connectapi.return_value = {"workoutUuid": self.UUID, "workoutSegments": [{"workoutSteps": []}]}
+        result = self.details(start="2026-11-22", end="2026-11-28")
+        self.assertEqual(result, {"status": "no_data", "data": {
+            "workoutUuid": self.UUID, "name": "Seuil", "sport": "running", "workoutType": "LACTATE_THRESHOLD",
+            "estimatedDurationSeconds": 2580, "workout": {"workoutSegments": []},
+        }})
+
+    def test_requires_exclusion_evidence_from_every_plan_and_week(self):
+        wrong_uuid = "123e4567-e89b-42d3-a456-426614174001"
+        complete_rows = [self.threshold(scheduleDate=f"2026-11-{day}", workoutUuid=wrong_uuid) for day in range(23, 30)]
+        incomplete_plan = self.plan([], trainingPlanId=12)
+        self.garmin.query_garmin_graphql.return_value = self.result(self.plan(complete_rows), incomplete_plan)
+        self.assertEqual(self.details(), {"status": "coach_read_failed"})
+
+        rest_schedule = self.result(self.plan([self.threshold(isRestDay=True)]))
+        for error, expected in [(TimeoutError("excluded"), "coach_read_failed"),
+                                (GarminConnectConnectionError("API Error 403"), "garmin_access_denied")]:
+            with self.subTest(status=expected):
+                self.garmin.query_garmin_graphql.side_effect = [error, rest_schedule]
+                self.assertEqual(self.details(start="2026-11-22", end="2026-11-28"), {"status": expected})
+        self.garmin.connectapi.assert_not_called()
+
+    def test_requires_identifiable_details_and_usable_steps(self):
+        self.garmin.query_garmin_graphql.return_value = self.result(self.plan([self.threshold()]))
+        for invalid_step in (
+            {"targetValueOne": True}, {"stepType": False}, {"stepType": {"stepTypeKey": True}},
+            {"targetType": True}, {"targetType": {"workoutTargetTypeId": True}},
+            {"secondaryTargetType": True}, {"description": " \n\t "}, {"description": 123},
+        ):
+            with self.subTest(step=invalid_step):
+                self.garmin.connectapi.return_value = {"workoutSegments": [{"workoutSteps": [invalid_step]}]}
+                self.assertEqual(self.details(), {"status": "coach_read_failed"})
+        step = {"stepType": {"stepTypeKey": "interval"}}
+        for invalid_count in (None, True, 0, -1, 2.5, "4"):
+            with self.subTest(repeat_count=invalid_count):
+                repeat = {"type": "RepeatGroupDTO", "numberOfIterations": invalid_count, "workoutSteps": [step]}
+                self.garmin.connectapi.return_value = {"workoutSegments": [{"workoutSteps": [repeat]}]}
+                self.assertEqual(self.details(), {"status": "coach_read_failed"})
+
+        segments = [{"workoutSteps": [step]}]
+        for invalid_workout in (
+            {"workoutSegments": []}, {"workoutSegments": [{"workoutSteps": []}]},
+            {"sportType": {"sportTypeKey": "running"}, "workoutSegments": []},
+            {"workoutUuid": None, "workoutSegments": segments},
+            {"workoutUuid": False, "workoutSegments": segments},
+            {"workoutUuid": "", "workoutSegments": segments},
+            {"sportType": {"sportTypeKey": "cycling"}, "workoutSegments": segments},
+            {"workoutSegments": [{"sportType": "swimming", "workoutSteps": [step]}]},
+        ):
+            with self.subTest(workout=invalid_workout):
+                self.garmin.connectapi.return_value = invalid_workout
+                self.assertEqual(self.details(), {"status": "coach_read_failed"})
+
+        self.garmin.connectapi.return_value = {"workoutName": "Seuil", "workoutSegments": []}
+        self.assertEqual(self.details()["status"], "no_data")
+        self.garmin.connectapi.return_value = {"workoutSegments": segments}
+        self.assertEqual(self.details()["status"], "ok")
+
+    def test_maps_detail_errors_and_never_exposes_unusable_payloads(self):
+        self.garmin.query_garmin_graphql.return_value = self.result(self.plan([self.threshold()]))
+        for error, expected in [(GarminConnectConnectionError("API Error 404"), "coach_workout_not_found"),
+                                (GarminConnectConnectionError("API Error 401"), "workout_session_unavailable"),
+                                (GarminConnectConnectionError("API Error 403"), "garmin_access_denied"),
+                                (GarminConnectConnectionError("API Error 429"), "garmin_rate_limited"),
+                                (TimeoutError("excluded"), "coach_read_failed")]:
+            with self.subTest(status=expected):
+                self.garmin.connectapi.side_effect = error
+                self.assertEqual(self.details(), {"status": expected})
+        self.garmin.connectapi.side_effect = None
+        for malformed in ([], {}, {"error": "excluded"}, {"workoutUuid": "123e4567-e89b-42d3-a456-426614174001"},
+                          {"workoutUuid": self.UUID, "workoutSegments": {}},
+                          {"workoutSegments": [{}]},
+                          {"workoutSegments": [{"workoutSteps": [1]}]},
+                          {"workoutSegments": [{"workoutSteps": [{}]}]},
+                          {"workoutSegments": [{"workoutSteps": [{"type": "RepeatGroupDTO", "numberOfIterations": 4}]}]},
+                          {"workoutSegments": [{"workoutSteps": [{"numberOfIterations": 4, "workoutSteps": []}]}]}):
+            with self.subTest(payload=malformed):
+                self.garmin.connectapi.return_value = malformed
+                self.assertEqual(self.details(), {"status": "coach_read_failed"})
+        self.garmin.connectapi.return_value = {"workoutSegments": [{"workoutSteps": [{"description": "é" * 40_000}]}]}
+        self.assertEqual(json.loads(bounded_output(self.details(), False)), {"status": "workout_detail_limit"})
 
 
 if __name__ == "__main__":
